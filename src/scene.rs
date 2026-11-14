@@ -962,6 +962,8 @@ impl Graphics {
         }
         let window_x = origin_x + window.x;
         let window_y = origin_y + window.y;
+        let control_clip =
+            clip.intersect(Rect::new(window_x, window_y, window.width, window.height));
         stamp(
             frame,
             &skin_target,
@@ -989,7 +991,7 @@ impl Graphics {
                             &cursor,
                             window_x + window.cursor_rect.x + 16,
                             window_y + window.cursor_rect.y + 16,
-                            clip,
+                            control_clip,
                             255,
                         );
                     }
@@ -1004,7 +1006,7 @@ impl Graphics {
                             &pause,
                             window_x + (window.width - 16) / 2,
                             window_y + window.height - 16,
-                            clip,
+                            control_clip,
                             255,
                         );
                     }
@@ -1973,5 +1975,30 @@ mod tests {
         let edge = g.frame().get_pixel(10, 4).red;
         assert!((center - 128.0).abs() < 1.0, "center {center}");
         assert!((edge - 128.0).abs() < 1.0, "edge {edge}");
+    }
+
+    #[test]
+    fn window_controls_stay_inside_the_window() {
+        let mut g = Graphics::new(32, 32, 1).unwrap();
+        let skin = g.create_bitmap(192, 128).unwrap();
+        g.bitmap_mut(skin)
+            .unwrap()
+            .fill_rect(Rect::new(0, 0, 192, 128), Color::rgb(255.0, 255.0, 255.0));
+        let window = g.create_window(None);
+        {
+            let window = g.window_mut(window).unwrap();
+            window.x = 8;
+            window.y = 8;
+            window.width = 8;
+            window.height = 8;
+            window.opacity = 0;
+            window.windowskin = Some(skin);
+            window.cursor_rect = Rect::new(-16, -16, 32, 32);
+            window.pause = true;
+        }
+        g.update().unwrap();
+        assert_eq!(g.frame().get_pixel(4, 0).red, 0.0, "pause");
+        assert_eq!(g.frame().get_pixel(20, 20).red, 0.0, "cursor");
+        assert!(g.frame().get_pixel(8, 8).red > 200.0, "inside");
     }
 }
