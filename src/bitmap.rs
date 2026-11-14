@@ -226,19 +226,19 @@ impl Bitmap {
     }
 
     pub fn gradient_fill_rect(&mut self, rect: Rect, start: Color, end: Color, vertical: bool) {
-        if self.disposed {
+        if self.disposed || rect.width <= 0 || rect.height <= 0 {
             return;
         }
-        let rect = rect.intersect(self.rect());
-        if rect.is_empty() {
+        let clip = rect.intersect(self.rect());
+        if clip.is_empty() {
             return;
         }
         let span = if vertical { rect.height } else { rect.width };
         let a = start.to_rgba8();
         let b = end.to_rgba8();
-        for y in 0..rect.height {
-            for x in 0..rect.width {
-                let index = if vertical { y } else { x };
+        for y in clip.y..clip.bottom() {
+            for x in clip.x..clip.right() {
+                let index = if vertical { y - rect.y } else { x - rect.x };
                 let t = if span <= 1 {
                     0.0
                 } else {
@@ -248,7 +248,7 @@ impl Bitmap {
                 for c in 0..4 {
                     px[c] = (a[c] as f32 + (b[c] as f32 - a[c] as f32) * t).round() as u8;
                 }
-                self.put(rect.x + x, rect.y + y, px);
+                self.put(x, y, px);
             }
         }
     }
@@ -271,34 +271,43 @@ impl Bitmap {
         }
     }
 
-    /// One-pixel box blur. mkxp blurs on the GPU; this is the same neighborhood
-    /// average, applied to RGB and leaving alpha unchanged.
+    /// Separable 3-tap blur matching `shader/blur.frag`: a horizontal pass and
+    /// a vertical pass, each averaging the pixel with its two neighbors.
+    /// Samples outside the bitmap repeat the edge pixel, and alpha is included.
     pub fn blur(&mut self) {
-        if self.disposed {
+        if self.disposed || self.width <= 0 || self.height <= 0 {
             return;
         }
+        self.blur_axis(true);
+        self.blur_axis(false);
+    }
+
+    fn blur_axis(&mut self, horizontal: bool) {
         let original = self.pixels.clone();
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let mut acc = [0u32; 3];
-                let mut count = 0u32;
-                for oy in -1..=1 {
-                    for ox in -1..=1 {
-                        let sx = x + ox;
-                        let sy = y + oy;
-                        if let Some(px) = self.sample_from(&original, sx, sy) {
-                            acc[0] += px[0] as u32;
-                            acc[1] += px[1] as u32;
-                            acc[2] += px[2] as u32;
-                            count += 1;
-                        }
+        let width = self.width;
+        let height = self.height;
+        for y in 0..height {
+            for x in 0..width {
+                let mut acc = [0u32; 4];
+                for delta in -1..=1 {
+                    let sx = if horizontal {
+                        (x + delta).clamp(0, width - 1)
+                    } else {
+                        x
+                    };
+                    let sy = if horizontal {
+                        y
+                    } else {
+                        (y + delta).clamp(0, height - 1)
+                    };
+                    let px = self.sample_from(&original, sx, sy).unwrap();
+                    for (channel, sample) in acc.iter_mut().zip(px) {
+                        *channel += sample as u32;
                     }
                 }
-                if count > 0 {
-                    let index = self.offset(x, y).unwrap();
-                    for (c, sum) in acc.iter().enumerate() {
-                        self.pixels[index + c] = (sum / count) as u8;
-                    }
+                let index = self.offset(x, y).unwrap();
+                for (channel, sum) in acc.iter().enumerate() {
+                    self.pixels[index + channel] = (sum / 3) as u8;
                 }
             }
         }

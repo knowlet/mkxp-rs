@@ -3,6 +3,8 @@ use crate::color::Color;
 /// Bitmap font used by `Bitmap#draw_text`. mkxp draws with FreeType; this
 /// runtime uses a 3x5 glyph set so text layout, alignment, outline, and shadow
 /// can run without a system font. ASCII letters are case-insensitive.
+/// `bold` and `italic` are stored for script compatibility and do not change
+/// these glyphs.
 #[derive(Clone, Debug)]
 pub struct Font {
     pub name: String,
@@ -69,7 +71,7 @@ pub fn glyph_rows(ch: char) -> [u8; 5] {
         'S' => [0b011, 0b100, 0b010, 0b001, 0b110],
         'T' => [0b111, 0b010, 0b010, 0b010, 0b010],
         'U' => [0b101, 0b101, 0b101, 0b101, 0b010],
-        'V' => [0b101, 0b101, 0b101, 0b101, 0b010],
+        'V' => [0b101, 0b101, 0b101, 0b010, 0b010],
         'W' => [0b101, 0b101, 0b111, 0b111, 0b101],
         'X' => [0b101, 0b101, 0b010, 0b101, 0b101],
         'Y' => [0b101, 0b101, 0b010, 0b010, 0b010],

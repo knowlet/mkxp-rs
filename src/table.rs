@@ -21,6 +21,9 @@ impl Table {
             .checked_mul(y as usize)
             .and_then(|n| n.checked_mul(z as usize))
             .ok_or_else(|| Error::new("Table dimensions overflow"))?;
+        if cells > i32::MAX as usize {
+            return Err(Error::new("Table dimensions overflow"));
+        }
         Ok(Self {
             x,
             y,
@@ -123,7 +126,10 @@ impl Table {
             *slot = i32::from_le_bytes(data[start..start + 4].try_into().unwrap());
         }
         let [_dim, x, y, z, size] = nums;
-        if x < 0 || y < 0 || z < 0 || size != x.saturating_mul(y).saturating_mul(z) {
+        let cells = (x as i64)
+            .checked_mul(y as i64)
+            .and_then(|n| n.checked_mul(z as i64));
+        if x < 0 || y < 0 || z < 0 || size < 0 || cells != Some(size as i64) {
             return Err(Error::new("Marshal: Table: bad file format"));
         }
         if data.len() != 20 + (size as usize) * 2 {

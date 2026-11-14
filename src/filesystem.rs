@@ -28,6 +28,14 @@ impl FileSystem {
 
     pub fn mount_dir(&mut self, path: impl AsRef<Path>) -> Result<()> {
         let root = path.as_ref();
+        if !self.allow_symlinks
+            && fs::symlink_metadata(root).is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            return Err(Error::new(format!(
+                "Failed to mount {}: symlink roots are disabled",
+                root.display()
+            )));
+        }
         if !root.is_dir() {
             return Err(Error::new(format!(
                 "Failed to mount {}: not a directory",
@@ -56,7 +64,19 @@ impl FileSystem {
     }
 
     pub fn exists(&self, path: &str) -> bool {
-        self.lookup(path, false).is_some()
+        let logical = normalize_logical(path);
+        for mount in &self.mounts {
+            let present = match mount {
+                Mount::Dir { root } => self.dir_has_file(root, &logical),
+                Mount::Archive(archive) => archive
+                    .files()
+                    .any(|name| name.eq_ignore_ascii_case(&logical)),
+            };
+            if present {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn read(&self, path: &str) -> Result<Vec<u8>> {
@@ -77,11 +97,17 @@ impl FileSystem {
     fn lookup_named(&self, path: &str, supplement: bool) -> Option<(String, Vec<u8>)> {
         let logical = normalize_logical(path);
         for mount in &self.mounts {
-            if let Some(found) = match mount {
-                Mount::Dir { root } => self.lookup_dir(root, &logical, supplement),
-                Mount::Archive(archive) => lookup_archive(archive, &logical, supplement),
-            } {
-                return Some(found);
+            match mount {
+                Mount::Dir { root } => match self.lookup_dir(root, &logical, supplement) {
+                    Some(Some(found)) => return Some(found),
+                    Some(None) => return None,
+                    None => {}
+                },
+                Mount::Archive(archive) => {
+                    if let Some(found) = lookup_archive(archive, &logical, supplement) {
+                        return Some(found);
+                    }
+                }
             }
         }
         None
@@ -92,7 +118,7 @@ impl FileSystem {
         root: &Path,
         logical: &str,
         supplement: bool,
-    ) -> Option<(String, Vec<u8>)> {
+    ) -> Option<Option<(String, Vec<u8>)>> {
         let parent_rel = parent_logical(logical);
         let file_rel = file_logical(logical);
         let parent = self.resolve_existing(root, &parent_rel)?;
@@ -118,7 +144,26 @@ impl FileSystem {
         } else {
             format!("{display_parent}/{name}")
         };
-        Some((logical_name, fs::read(full).ok()?))
+        Some(fs::read(full).ok().map(|bytes| (logical_name, bytes)))
+    }
+
+    fn dir_has_file(&self, root: &Path, logical: &str) -> bool {
+        let parent_rel = parent_logical(logical);
+        let file_rel = file_logical(logical);
+        let Some(parent) = self.resolve_existing(root, &parent_rel) else {
+            return false;
+        };
+        let Ok(entries) = fs::read_dir(&parent) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            self.allow_entry(&entry.path())
+                && entry.path().is_file()
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&file_rel)
+        })
     }
 
     /// Walk `logical` under `root`, matching each component without case.

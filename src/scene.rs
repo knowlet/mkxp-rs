@@ -136,9 +136,12 @@ impl Viewport {
     }
 
     pub fn flash(&mut self, color: Color, duration: i32) {
+        if duration < 1 {
+            return;
+        }
         self.flash_color = color;
-        self.flash_duration = duration.max(0);
-        self.flash_left = self.flash_duration;
+        self.flash_duration = duration;
+        self.flash_left = duration;
     }
 
     pub fn update(&mut self) {
@@ -301,6 +304,7 @@ enum Kind {
 
 struct Item {
     z: i32,
+    y: i32,
     creation: u64,
     kind: Kind,
 }
@@ -557,7 +561,6 @@ impl Graphics {
         let curr = self.brightness as f32;
         let diff = 255.0 - curr;
         if duration <= 0 {
-            self.brightness = if out { 0 } else { 255 };
             return Ok(());
         }
         if out {
@@ -613,6 +616,7 @@ impl Graphics {
                 if sprite.viewport == viewport {
                     items.push(Item {
                         z: sprite.z,
+                        y: sprite.y,
                         creation: sprite.creation,
                         kind: Kind::Sprite(index),
                     });
@@ -624,6 +628,7 @@ impl Graphics {
                 if plane.viewport == viewport {
                     items.push(Item {
                         z: plane.z,
+                        y: 0,
                         creation: plane.creation,
                         kind: Kind::Plane(index),
                     });
@@ -635,6 +640,7 @@ impl Graphics {
                 if window.viewport == viewport {
                     items.push(Item {
                         z: window.z,
+                        y: 0,
                         creation: window.creation,
                         kind: Kind::Window(index),
                     });
@@ -646,6 +652,7 @@ impl Graphics {
                 if tilemap.viewport == viewport {
                     items.push(Item {
                         z: tilemap.z,
+                        y: 0,
                         creation: tilemap.creation,
                         kind: Kind::Tilemap(index),
                     });
@@ -657,13 +664,22 @@ impl Graphics {
                 if let Some(view) = slot.value.as_ref() {
                     items.push(Item {
                         z: view.z,
+                        y: 0,
                         creation: view.creation,
                         kind: Kind::Viewport(index),
                     });
                 }
             }
         }
-        items.sort_by(|a, b| a.z.cmp(&b.z).then(a.creation.cmp(&b.creation)));
+        items.sort_by(|a, b| {
+            let order = a.z.cmp(&b.z);
+            if self.rgss_version >= 2 {
+                order.then(a.y.cmp(&b.y))
+            } else {
+                order
+            }
+            .then(a.creation.cmp(&b.creation))
+        });
         for item in items {
             match item.kind {
                 Kind::Sprite(index) => {
@@ -1026,6 +1042,9 @@ impl Graphics {
                         .as_ref()
                         .and_then(|table| table.get(tile, 0, 0))
                         .unwrap_or(0);
+                    if prio > 5 {
+                        continue;
+                    }
                     let dest_x = origin_x + tx * 32 - tilemap.ox;
                     let dest_y = origin_y + ty * 32 - tilemap.oy;
                     let job = TileJob {
@@ -1753,6 +1772,8 @@ mod tests {
         g.update().unwrap();
         g.freeze().unwrap();
         g.fadeout(0).unwrap();
+        assert_eq!(g.brightness, 255);
+        g.fadeout(1).unwrap();
         assert_eq!(g.brightness, 0);
         g.transition(0, None, 40).unwrap();
         g.update().unwrap();

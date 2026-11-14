@@ -4,8 +4,7 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 
-/// Subset of `mkxp.json` that the runtime honors. Unknown keys are kept so a
-/// later binding can forward them, but they do not change engine behavior.
+/// Subset of `mkxp.json` that the runtime honors. Unknown keys are ignored.
 #[derive(Clone, Debug)]
 pub struct Config {
     pub rgss_version: i32,
@@ -138,10 +137,8 @@ impl Config {
         }
         let game_dir = game_directory(dir, &config.game_folder);
         config.read_game_ini(&game_dir);
+        config.clamp_runtime();
         config.apply_screen_defaults();
-        config.rgss_version = config.rgss_version.clamp(0, 3);
-        config.se_source_count = config.se_source_count.clamp(1, 64);
-        config.bgm_track_count = config.bgm_track_count.clamp(1, 16);
         config.win_console = env_flag("MKXPZ_WINDOWS_CONSOLE", config.editor_debug);
         config.manual_folder_select = env_flag("MKXPZ_FOLDER_SELECT", false);
         config
@@ -150,6 +147,7 @@ impl Config {
     pub fn from_json5(text: &str) -> Result<Self> {
         let mut config = Self::default();
         config.apply_json(&parse_json5(text)?)?;
+        config.clamp_runtime();
         config.apply_screen_defaults();
         Ok(config)
     }
@@ -296,6 +294,12 @@ impl Config {
         if self.rgss_version == 0 {
             self.rgss_version = guess_version(&self.game_scripts);
         }
+    }
+
+    fn clamp_runtime(&mut self) {
+        self.rgss_version = self.rgss_version.clamp(0, 3);
+        self.se_source_count = self.se_source_count.clamp(1, 64);
+        self.bgm_track_count = self.bgm_track_count.clamp(1, 16);
     }
 
     fn apply_screen_defaults(&mut self) {
@@ -600,6 +604,28 @@ impl Parser<'_> {
                     b'n' => out.push('\n'),
                     b'r' => out.push('\r'),
                     b't' => out.push('\t'),
+                    b'b' => out.push('\u{0008}'),
+                    b'f' => out.push('\u{000c}'),
+                    b'v' => out.push('\u{000b}'),
+                    b'0' => out.push('\0'),
+                    b'\n' | b'\r' => {
+                        if escaped == b'\r' && self.peek() == Some(b'\n') {
+                            self.bump();
+                        }
+                    }
+                    b'x' => {
+                        let mut hex = [0u8; 2];
+                        for slot in &mut hex {
+                            *slot = self
+                                .bump()
+                                .ok_or_else(|| Error::new("truncated hex escape"))?;
+                        }
+                        let text =
+                            std::str::from_utf8(&hex).map_err(|_| Error::new("bad hex escape"))?;
+                        let code = u32::from_str_radix(text, 16)
+                            .map_err(|_| Error::new("bad hex escape"))?;
+                        out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
+                    }
                     b'u' => {
                         let mut hex = [0u8; 4];
                         for slot in &mut hex {

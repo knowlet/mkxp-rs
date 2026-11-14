@@ -198,7 +198,17 @@ impl Input {
                 repeatable: true,
             },
             Binding {
+                key: "kp_enter",
+                target: Button::C,
+                repeatable: true,
+            },
+            Binding {
                 key: "escape",
+                target: Button::B,
+                repeatable: true,
+            },
+            Binding {
+                key: "kp_0",
                 target: Button::B,
                 repeatable: true,
             },
@@ -250,27 +260,27 @@ impl Input {
             Binding {
                 key: "mouse_left",
                 target: Button::MouseLeft,
-                repeatable: false,
+                repeatable: true,
             },
             Binding {
                 key: "mouse_middle",
                 target: Button::MouseMiddle,
-                repeatable: false,
+                repeatable: true,
             },
             Binding {
                 key: "mouse_right",
                 target: Button::MouseRight,
-                repeatable: false,
+                repeatable: true,
             },
             Binding {
                 key: "mouse_x1",
                 target: Button::MouseX1,
-                repeatable: false,
+                repeatable: true,
             },
             Binding {
                 key: "mouse_x2",
                 target: Button::MouseX2,
-                repeatable: false,
+                repeatable: true,
             },
         ];
         if rgss_version <= 1 {

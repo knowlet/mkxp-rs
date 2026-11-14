@@ -50,11 +50,27 @@ impl Rect {
         x >= self.x && y >= self.y && x < self.right() && y < self.bottom()
     }
 
+    /// Flip a negative width or height so the origin is the top-left corner.
+    pub fn normalized(self) -> Self {
+        let mut rect = self;
+        if rect.width < 0 {
+            rect.x = rect.x.saturating_add(rect.width);
+            rect.width = rect.width.saturating_neg();
+        }
+        if rect.height < 0 {
+            rect.y = rect.y.saturating_add(rect.height);
+            rect.height = rect.height.saturating_neg();
+        }
+        rect
+    }
+
     pub fn intersect(self, other: Self) -> Self {
-        let x0 = self.x.max(other.x);
-        let y0 = self.y.max(other.y);
-        let x1 = self.right().min(other.right());
-        let y1 = self.bottom().min(other.bottom());
+        let self_rect = self.normalized();
+        let other = other.normalized();
+        let x0 = self_rect.x.max(other.x);
+        let y0 = self_rect.y.max(other.y);
+        let x1 = self_rect.right().min(other.right());
+        let y1 = self_rect.bottom().min(other.bottom());
         if x1 <= x0 || y1 <= y0 {
             Self::default()
         } else {

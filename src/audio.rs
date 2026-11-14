@@ -33,9 +33,18 @@ impl Default for Channel {
 
 impl Channel {
     fn play(&mut self, filename: &str, volume: i32, pitch: i32, pos: f64) {
+        let volume = volume.clamp(0, 100);
+        let pitch = pitch.clamp(50, 150);
+        if self.playing && self.filename == filename && self.pitch == pitch {
+            self.volume = volume;
+            self.fade_ms = 0;
+            self.fade_left = 0;
+            self.fade_from = volume;
+            return;
+        }
         self.filename = filename.to_string();
-        self.volume = volume.clamp(0, 100);
-        self.pitch = pitch.max(1);
+        self.volume = volume;
+        self.pitch = pitch;
         self.pos = pos.max(0.0);
         self.playing = !filename.is_empty();
         self.fade_ms = 0;
@@ -51,7 +60,7 @@ impl Channel {
     }
 
     fn fade(&mut self, time_ms: i32) {
-        if !self.playing {
+        if !self.playing || self.fade_left > 0 {
             return;
         }
         self.fade_from = self.volume;
@@ -110,21 +119,26 @@ impl Audio {
     }
 
     pub fn bgm_play(&mut self, filename: &str, volume: i32, pitch: i32, pos: f64, track: i32) {
+        if track == -127 {
+            for channel in self.bgm.iter_mut().skip(1) {
+                channel.stop();
+            }
+            if let Some(channel) = self.bgm.get_mut(0) {
+                channel.play(filename, volume, pitch, pos);
+            }
+            return;
+        }
         if let Some(channel) = self.bgm_mut(track) {
             channel.play(filename, volume, pitch, pos);
         }
     }
 
     pub fn bgm_stop(&mut self, track: i32) {
-        if let Some(channel) = self.bgm_mut(track) {
-            channel.stop();
-        }
+        self.each_bgm(track, Channel::stop);
     }
 
     pub fn bgm_fade(&mut self, time_ms: i32, track: i32) {
-        if let Some(channel) = self.bgm_mut(track) {
-            channel.fade(time_ms);
-        }
+        self.each_bgm(track, |channel| channel.fade(time_ms));
     }
 
     pub fn bgm_pos(&self, track: i32) -> f64 {
@@ -136,9 +150,11 @@ impl Audio {
     }
 
     pub fn set_bgm_volume(&mut self, volume: i32, track: i32) {
-        if let Some(channel) = self.bgm_mut(track) {
-            channel.volume = volume.clamp(0, 100);
-        }
+        let volume = volume.clamp(0, 100);
+        self.each_bgm(track, |channel| {
+            channel.volume = volume;
+            channel.fade_from = volume;
+        });
     }
 
     pub fn bgm_filename(&self, track: i32) -> &str {
@@ -171,6 +187,9 @@ impl Audio {
     }
 
     pub fn se_play(&mut self, filename: &str, volume: i32, pitch: i32) {
+        if filename.is_empty() {
+            return;
+        }
         if self.se.len() >= self.se_limit {
             self.se.remove(0);
         }
@@ -189,10 +208,10 @@ impl Audio {
 
     pub fn reset(&mut self) {
         for channel in &mut self.bgm {
-            *channel = Channel::default();
+            channel.stop();
         }
-        self.bgs = Channel::default();
-        self.me = Channel::default();
+        self.bgs.stop();
+        self.me.stop();
         self.se.clear();
     }
 
@@ -208,21 +227,37 @@ impl Audio {
         }
     }
 
-    fn track_index(&self, track: i32) -> usize {
-        if track < 0 {
-            0
-        } else {
-            (track as usize).min(self.bgm.len().saturating_sub(1))
+    fn track_slot(&self, track: i32) -> Option<usize> {
+        if track == -127 {
+            return Some(0);
+        }
+        if track < 0 || track as usize >= self.bgm.len() {
+            return None;
+        }
+        Some(track as usize)
+    }
+
+    fn each_bgm(&mut self, track: i32, mut apply: impl FnMut(&mut Channel)) {
+        if track == -127 {
+            for channel in &mut self.bgm {
+                apply(channel);
+            }
+            return;
+        }
+        if let Some(channel) = self.bgm_mut(track) {
+            apply(channel);
         }
     }
 
     fn bgm_ref(&self, track: i32) -> Option<&Channel> {
-        self.bgm.get(self.track_index(track))
+        self.bgm.get(self.track_slot(track)?)
     }
 
     fn bgm_mut(&mut self, track: i32) -> Option<&mut Channel> {
-        let index = self.track_index(track);
-        self.bgm.get_mut(index)
+        if track < 0 || track as usize >= self.bgm.len() {
+            return None;
+        }
+        self.bgm.get_mut(track as usize)
     }
 }
 

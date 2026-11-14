@@ -159,7 +159,7 @@ impl Archive {
             }
             let size = read_u32(&bytes[cursor..]) ^ advance(&mut magic);
             cursor += 4;
-            let name = String::from_utf8_lossy(&name);
+            let name = decode_archive_name(&name);
             let name = normalize_name(&name);
             let entry = Entry {
                 offset: cursor as u64,
@@ -221,7 +221,7 @@ impl Archive {
             for (i, byte) in name.iter_mut().enumerate() {
                 *byte ^= ((base_magic >> (8 * (i % 4))) & 0xFF) as u8;
             }
-            let name = normalize_name(&String::from_utf8_lossy(&name));
+            let name = normalize_name(&decode_archive_name(&name));
             insert_entry(
                 &mut entries,
                 &mut dirs,
@@ -298,6 +298,13 @@ fn insert_entry(
 fn push_unique(list: &mut Vec<String>, value: String) {
     if !list.iter().any(|item| item == &value) {
         list.push(value);
+    }
+}
+
+fn decode_archive_name(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => bytes.iter().map(|byte| char::from(*byte)).collect(),
     }
 }
 

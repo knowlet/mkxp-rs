@@ -89,9 +89,9 @@ pub fn apply_tone_color(rgb: [f32; 3], tone: [f32; 4], color: [f32; 4]) -> [f32;
         rgb[1] + (luma - rgb[1]) * gray + tone[1],
         rgb[2] + (luma - rgb[2]) * gray + tone[2],
     ];
-    let ca = color[3].clamp(0.0, 1.0);
+    let ca = color[3];
     for i in 0..3 {
-        out[i] = out[i] * (1.0 - ca) + color[i].clamp(0.0, 1.0) * ca;
+        out[i] = out[i] * (1.0 - ca) + color[i] * ca;
     }
     out
 }
