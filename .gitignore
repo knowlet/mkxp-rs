@@ -13,6 +13,7 @@ xxd+
 /build
 /builddir
 /ccache
+/target
 
 # VS Code
 /.vscode

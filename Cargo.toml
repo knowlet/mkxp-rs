@@ -1,0 +1,15 @@
+[package]
+name = "mkxpz"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "Rust reimplementation of the mkxp-z RGSS runtime core"
+publish = false
+readme = "README.md"
+
+[[bin]]
+name = "mkxpz"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
