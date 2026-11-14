@@ -547,12 +547,14 @@ fn install_extracted(path: &Path, bytes: &[u8]) -> Result<()> {
     // Keep the temporary name short. A destination component may already be
     // 255 bytes, which is the maximum on common Linux filesystems.
     let tmp = parent.join(format!(".mkxpz-{}-{seq}", std::process::id()));
+    // A collision belongs to somebody else: do not enter cleanup until we
+    // have successfully created and own this temporary file.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|err| Error::new(err.to_string()))?;
     let write_result = (|| -> Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(|err| Error::new(err.to_string()))?;
         file.write_all(bytes)
             .map_err(|err| Error::new(err.to_string()))?;
         // Replace the directory entry, but keep the mode of a file already
@@ -565,6 +567,7 @@ fn install_extracted(path: &Path, bytes: &[u8]) -> Result<()> {
         }
         Ok(())
     })();
+    drop(file);
     if let Err(err) = write_result {
         let _ = std::fs::remove_file(&tmp);
         return Err(err);
@@ -590,6 +593,33 @@ fn install_extracted(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extraction_temp_collision_preserves_existing_file() {
+        const CHILD: &str = "MKXPZ_TEMP_COLLISION_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            // Isolate the temp counter from concurrently running extraction tests.
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "archive::tests::extraction_temp_collision_preserves_existing_file",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("mkxpz-collision-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let tmp = root.join(format!(".mkxpz-{}-0", std::process::id()));
+        std::fs::write(&tmp, b"existing data").unwrap();
+        let result = install_extracted(&root.join("output"), b"archive data");
+        let preserved = std::fs::read(&tmp);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(result.is_err());
+        assert_eq!(preserved.unwrap(), b"existing data");
+    }
 
     #[test]
     fn v1_and_v3_roundtrip_including_a_mid_file_seek() {
