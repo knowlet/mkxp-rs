@@ -540,14 +540,13 @@ static EXTRACT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 fn install_extracted(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path
-        .file_name()
-        .ok_or_else(|| Error::new("archive entry is not a file"))?;
+    if path.file_name().is_none() {
+        return Err(Error::new("archive entry is not a file"));
+    }
     let seq = EXTRACT_TEMP.fetch_add(1, Ordering::Relaxed);
-    let mut tmp_name = std::ffi::OsString::from(".");
-    tmp_name.push(name);
-    tmp_name.push(format!(".{}.{seq}.mkxpz-tmp", std::process::id()));
-    let tmp = parent.join(tmp_name);
+    // Keep the temporary name short. A destination component may already be
+    // 255 bytes, which is the maximum on common Linux filesystems.
+    let tmp = parent.join(format!(".mkxpz-{}-{seq}", std::process::id()));
     let write_result = (|| -> Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -556,6 +555,14 @@ fn install_extracted(path: &Path, bytes: &[u8]) -> Result<()> {
             .map_err(|err| Error::new(err.to_string()))?;
         file.write_all(bytes)
             .map_err(|err| Error::new(err.to_string()))?;
+        // Replace the directory entry, but keep the mode of a file already
+        // at that name so a private file does not become world-readable.
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_type().is_file() {
+                std::fs::set_permissions(&tmp, meta.permissions())
+                    .map_err(|err| Error::new(err.to_string()))?;
+            }
+        }
         Ok(())
     })();
     if let Err(err) = write_result {
@@ -642,6 +649,8 @@ mod tests {
 
     #[test]
     fn extract_refuses_to_follow_a_destination_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = std::env::temp_dir().join(format!("mkxpz-extract-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let dest = dir.join("out");
@@ -674,6 +683,35 @@ mod tests {
             std::fs::read(linked.join("Data").join("settings.ini")).unwrap(),
             b"secret"
         );
+
+        let long_name = "a".repeat(255);
+        let long_root = dir.join("long");
+        let packed = Archive::pack(1, &[(&long_name, b"ok")]).unwrap();
+        Archive::open(packed)
+            .unwrap()
+            .extract_to(&long_root)
+            .unwrap();
+        assert_eq!(std::fs::read(long_root.join(&long_name)).unwrap(), b"ok");
+
+        let private_root = dir.join("private");
+        std::fs::create_dir_all(&private_root).unwrap();
+        let private_file = private_root.join("secret.txt");
+        std::fs::write(&private_file, b"old").unwrap();
+        let mut perms = std::fs::metadata(&private_file).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&private_file, perms).unwrap();
+        let packed = Archive::pack(1, &[("secret.txt", b"new")]).unwrap();
+        Archive::open(packed)
+            .unwrap()
+            .extract_to(&private_root)
+            .unwrap();
+        assert_eq!(std::fs::read(&private_file).unwrap(), b"new");
+        let mode = std::fs::metadata(&private_file)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
