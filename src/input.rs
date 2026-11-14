@@ -108,7 +108,65 @@ pub struct Input {
 
 impl Input {
     pub fn new(rgss_version: i32, fixed_framerate: i32) -> Self {
+        // Fixed bindings from `staticKbBindings` are polled before the
+        // rebindable defaults, matching `applyBindings`. Left Shift still
+        // maps to A through the default table below.
         let mut bindings = vec![
+            Binding {
+                key: "lshift",
+                target: Button::Shift,
+                repeatable: true,
+            },
+            Binding {
+                key: "rshift",
+                target: Button::Shift,
+                repeatable: true,
+            },
+            Binding {
+                key: "lctrl",
+                target: Button::Ctrl,
+                repeatable: true,
+            },
+            Binding {
+                key: "rctrl",
+                target: Button::Ctrl,
+                repeatable: true,
+            },
+            Binding {
+                key: "lalt",
+                target: Button::Alt,
+                repeatable: true,
+            },
+            Binding {
+                key: "ralt",
+                target: Button::Alt,
+                repeatable: true,
+            },
+            Binding {
+                key: "f5",
+                target: Button::F5,
+                repeatable: true,
+            },
+            Binding {
+                key: "f6",
+                target: Button::F6,
+                repeatable: true,
+            },
+            Binding {
+                key: "f7",
+                target: Button::F7,
+                repeatable: true,
+            },
+            Binding {
+                key: "f8",
+                target: Button::F8,
+                repeatable: true,
+            },
+            Binding {
+                key: "f9",
+                target: Button::F9,
+                repeatable: true,
+            },
             Binding {
                 key: "left",
                 target: Button::Left,
@@ -523,6 +581,23 @@ mod tests {
         vx.update();
         assert!(vx.is_triggered(Button::C));
         assert!(!vx.is_triggered(Button::A));
+
+        let mut modifiers = Input::new(1, 0);
+        modifiers.set_key("lshift", true);
+        modifiers.update();
+        assert!(modifiers.is_pressed(Button::A));
+        assert!(modifiers.is_pressed(Button::Shift));
+        modifiers.set_key("lshift", false);
+        modifiers.set_key("rshift", true);
+        modifiers.set_key("rctrl", true);
+        modifiers.set_key("ralt", true);
+        modifiers.set_key("f5", true);
+        modifiers.update();
+        assert!(modifiers.is_pressed(Button::Shift));
+        assert!(!modifiers.is_pressed(Button::A));
+        assert!(modifiers.is_pressed(Button::Ctrl));
+        assert!(modifiers.is_pressed(Button::Alt));
+        assert!(modifiers.is_pressed(Button::F5));
     }
 
     #[test]

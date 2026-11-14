@@ -397,6 +397,9 @@ impl Graphics {
         let Some(frozen) = self.frozen.clone() else {
             return Ok(());
         };
+        // mkxp's Graphics::transition calls setBrightness(255) before the
+        // new scene is captured, so a fadeout does not freeze the target black.
+        self.brightness = 255;
         let current = self.composite()?;
         let vague = (vague.clamp(1, 256) as f32) / 256.0;
         let map = trans_map.and_then(|h| self.bitmap(h).ok()).cloned();
@@ -1682,6 +1685,25 @@ mod tests {
         let mid = g.frame().get_pixel(0, 0).red;
         assert!(mid > 0.0 && mid < 255.0, "{mid}");
         g.update().unwrap();
+        assert_eq!(g.frame().get_pixel(0, 0).red, 255.0);
+    }
+
+    #[test]
+    fn transition_restores_brightness_after_fadeout() {
+        let mut g = Graphics::new(1, 1, 1).unwrap();
+        let bmp = g.create_bitmap(1, 1).unwrap();
+        g.bitmap_mut(bmp)
+            .unwrap()
+            .fill_rect(Rect::new(0, 0, 1, 1), Color::rgb(255.0, 255.0, 255.0));
+        let sprite = g.create_sprite(None);
+        g.set_sprite_bitmap(sprite, Some(bmp)).unwrap();
+        g.update().unwrap();
+        g.freeze().unwrap();
+        g.fadeout(0).unwrap();
+        assert_eq!(g.brightness, 0);
+        g.transition(0, None, 40).unwrap();
+        g.update().unwrap();
+        assert_eq!(g.brightness, 255);
         assert_eq!(g.frame().get_pixel(0, 0).red, 255.0);
     }
 

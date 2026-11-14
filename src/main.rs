@@ -120,7 +120,7 @@ fn extract_archive(args: Vec<String>) -> mkxpz::Result<()> {
     let archive = Archive::open(bytes)?;
     let root = PathBuf::from(dest);
     for name in archive.files() {
-        let file = root.join(name);
+        let file = Archive::destination_path(&root, name)?;
         if let Some(parent) = file.parent() {
             fs::create_dir_all(parent).map_err(|err| Error::new(err.to_string()))?;
         }

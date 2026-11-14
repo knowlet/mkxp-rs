@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
@@ -41,6 +42,33 @@ impl Archive {
 
     pub fn version(&self) -> u8 {
         self.version
+    }
+
+    /// Path of `name` under `root`. Drive prefixes, NUL bytes, and other
+    /// non-relative components are rejected so extraction cannot replace the
+    /// destination (on Windows, `root.join("C:/outside")` is absolute).
+    pub fn destination_path(root: &Path, name: &str) -> Result<PathBuf> {
+        let normalized = normalize_name(name);
+        if normalized.is_empty() {
+            return Err(Error::new(format!(
+                "archive entry escapes the destination: {name}"
+            )));
+        }
+        let mut file = root.to_path_buf();
+        for part in normalized.split('/') {
+            if !is_relative_component(part) {
+                return Err(Error::new(format!(
+                    "archive entry escapes the destination: {name}"
+                )));
+            }
+            file.push(part);
+        }
+        if !file.starts_with(root) {
+            return Err(Error::new(format!(
+                "archive entry escapes the destination: {name}"
+            )));
+        }
+        Ok(file)
     }
 
     pub fn files(&self) -> impl Iterator<Item = &str> {
@@ -255,6 +283,15 @@ fn push_unique(list: &mut Vec<String>, value: String) {
     }
 }
 
+fn is_relative_component(part: &str) -> bool {
+    !part.is_empty()
+        && part != "."
+        && part != ".."
+        && !part.contains(':')
+        && !part.contains('\0')
+        && !Path::new(part).is_absolute()
+}
+
 fn normalize_name(path: &str) -> String {
     let mut out = String::new();
     for part in path.replace('\\', "/").split('/') {
@@ -436,6 +473,18 @@ mod tests {
                 archive.read("Graphics/Pictures/Face.png").unwrap(),
                 b"\x89PNG-not-really"
             );
+            let root_dir = Path::new("out");
+            let face = Archive::destination_path(root_dir, r"Graphics\Pictures\Face.png").unwrap();
+            assert_eq!(
+                face,
+                root_dir.join("Graphics").join("Pictures").join("Face.png")
+            );
+            assert!(Archive::destination_path(root_dir, "C:/outside/file").is_err());
+            assert!(Archive::destination_path(root_dir, r"C:\outside\file").is_err());
+            assert!(Archive::destination_path(root_dir, "..").is_err());
+            assert!(Archive::destination_path(root_dir, "a\0b").is_err());
+            let nested = Archive::destination_path(root_dir, "/etc/passwd").unwrap();
+            assert!(nested.starts_with(root_dir));
             let mut root = archive.list_dir("");
             root.sort();
             assert_eq!(root, ["Data", "Graphics", "Hello.txt"]);

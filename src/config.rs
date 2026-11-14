@@ -136,7 +136,8 @@ impl Config {
                 .warnings
                 .push(format!("Failed to read {}: {err}", path.display())),
         }
-        config.read_game_ini(dir);
+        let game_dir = game_directory(dir, &config.game_folder);
+        config.read_game_ini(&game_dir);
         config.apply_screen_defaults();
         config.rgss_version = config.rgss_version.clamp(0, 3);
         config.se_source_count = config.se_source_count.clamp(1, 64);
@@ -304,6 +305,18 @@ impl Config {
     pub fn font_is_solid(&self, name: &str) -> bool {
         let lower = name.to_ascii_lowercase();
         self.solid_fonts.iter().any(|font| font == &lower)
+    }
+}
+
+fn game_directory(config_dir: &Path, game_folder: &str) -> std::path::PathBuf {
+    if game_folder.is_empty() {
+        return config_dir.to_path_buf();
+    }
+    let folder = Path::new(game_folder);
+    if folder.is_absolute() {
+        folder.to_path_buf()
+    } else {
+        config_dir.join(folder)
     }
 }
 
@@ -541,11 +554,16 @@ impl Parser<'_> {
     fn parse_string(&mut self, quote: u8) -> Result<String> {
         self.bump();
         let mut out = String::new();
-        while let Some(byte) = self.bump() {
+        loop {
+            let byte = self
+                .peek()
+                .ok_or_else(|| Error::new("unterminated string"))?;
             if byte == quote {
+                self.bump();
                 return Ok(out);
             }
             if byte == b'\\' {
+                self.bump();
                 let escaped = self
                     .bump()
                     .ok_or_else(|| Error::new("truncated string escape"))?;
@@ -569,11 +587,29 @@ impl Parser<'_> {
                     }
                     _ => return Err(Error::new("unknown string escape")),
                 }
-            } else {
-                out.push(byte as char);
+                continue;
             }
+            let width = match byte {
+                0x00..=0x7F => 1,
+                0xC2..=0xDF => 2,
+                0xE0..=0xEF => 3,
+                0xF0..=0xF4 => 4,
+                _ => return Err(Error::new("invalid utf-8 in string")),
+            };
+            let end = self.index + width;
+            let slice = self
+                .bytes
+                .get(self.index..end)
+                .ok_or_else(|| Error::new("invalid utf-8 in string"))?;
+            let text =
+                std::str::from_utf8(slice).map_err(|_| Error::new("invalid utf-8 in string"))?;
+            let ch = text
+                .chars()
+                .next()
+                .ok_or_else(|| Error::new("invalid utf-8 in string"))?;
+            self.index = end;
+            out.push(ch);
         }
-        Err(Error::new("unterminated string"))
     }
     fn parse_number(&mut self) -> Result<Json> {
         let start = self.index;
@@ -657,6 +693,9 @@ mod tests {
         assert_eq!(config.rtps, ["Standard"]);
         assert_eq!(config.window_title, "Demo");
         assert_eq!(config.screen_size(), (544, 416));
+        let utf8 = Config::from_json5("{ RTP: [\"Pokémon\"], windowTitle: \"勇者\" }").unwrap();
+        assert_eq!(utf8.rtps, ["Pokémon"]);
+        assert_eq!(utf8.window_title, "勇者");
     }
 
     #[test]
@@ -674,6 +713,30 @@ mod tests {
         assert_eq!(config.game_title, "Harbor");
         assert_eq!(config.rgss_version, 3);
         assert_eq!(config.game_scripts, "Data/Scripts.rvdata2");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn game_folder_reads_the_ini_inside_the_selected_directory() {
+        let dir = std::env::temp_dir().join(format!("mkxpz-gamefolder-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let game = dir.join("Game");
+        fs::create_dir_all(&game).unwrap();
+        fs::write(dir.join("mkxp.json"), "{ gameFolder: \"Game\" }\n").unwrap();
+        fs::write(
+            dir.join("Game.ini"),
+            "[Game]\nTitle=Wrong\nScripts=Data\\Scripts.rxdata\n",
+        )
+        .unwrap();
+        fs::write(
+            game.join("Game.ini"),
+            "[Game]\nTitle=Nested\nScripts=Data\\Scripts.rvdata2\n",
+        )
+        .unwrap();
+        let config = Config::load_dir(&dir, &[]);
+        assert_eq!(config.game_title, "Nested");
+        assert_eq!(config.game_scripts, "Data/Scripts.rvdata2");
+        assert_eq!(config.rgss_version, 3);
         let _ = fs::remove_dir_all(&dir);
     }
 
