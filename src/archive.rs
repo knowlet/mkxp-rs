@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{Error, Result};
 
@@ -529,7 +531,53 @@ fn write_extracted(root: &Path, name: &str, bytes: &[u8]) -> Result<()> {
             Err(err) => return Err(Error::new(err.to_string())),
         }
     }
-    std::fs::write(&current, bytes).map_err(|err| Error::new(err.to_string()))
+    // A new inode is renamed into place. `fs::write` would truncate an existing
+    // hard link and change the file outside `root` that shares that inode.
+    install_extracted(&current, bytes)
+}
+
+static EXTRACT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+fn install_extracted(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| Error::new("archive entry is not a file"))?;
+    let seq = EXTRACT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".{}.{seq}.mkxpz-tmp", std::process::id()));
+    let tmp = parent.join(tmp_name);
+    let write_result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|err| Error::new(err.to_string()))?;
+        file.write_all(bytes)
+            .map_err(|err| Error::new(err.to_string()))?;
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Windows refuses to replace an existing name. Unlink that
+            // directory entry only; other hard links keep the old bytes.
+            let replaced = std::fs::remove_file(path).and_then(|_| std::fs::rename(&tmp, path));
+            if replaced.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            replaced.map_err(|err| Error::new(err.to_string()))
+        }
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(Error::new(err.to_string()))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -611,6 +659,19 @@ mod tests {
         Archive::open(packed).unwrap().extract_to(&ok).unwrap();
         assert_eq!(
             std::fs::read(ok.join("Data").join("settings.ini")).unwrap(),
+            b"secret"
+        );
+
+        let linked = dir.join("linked");
+        let outside_file = dir.join("outside.txt");
+        std::fs::create_dir_all(linked.join("Data")).unwrap();
+        std::fs::write(&outside_file, b"keep").unwrap();
+        std::fs::hard_link(&outside_file, linked.join("Data").join("settings.ini")).unwrap();
+        let packed = Archive::pack(1, &[("Data/settings.ini", b"secret")]).unwrap();
+        Archive::open(packed).unwrap().extract_to(&linked).unwrap();
+        assert_eq!(std::fs::read(&outside_file).unwrap(), b"keep");
+        assert_eq!(
+            std::fs::read(linked.join("Data").join("settings.ini")).unwrap(),
             b"secret"
         );
         let _ = std::fs::remove_dir_all(&dir);
