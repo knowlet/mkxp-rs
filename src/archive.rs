@@ -586,8 +586,9 @@ mod tests {
 
     #[test]
     fn archive_fields_reject_values_past_u32() {
-        let too_big = (u32::MAX as usize).saturating_add(1);
-        assert!(as_u32(too_big, "archive offset").is_err());
+        // `u32::MAX + 1` overflows the archive field on every pointer width.
+        // `saturating_add` on `usize` would hide that on 32-bit targets.
+        assert!(checked_sum(u32::MAX as usize, 1).is_err());
         assert!(checked_sum(usize::MAX, 1).is_err());
     }
 

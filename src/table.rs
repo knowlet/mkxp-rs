@@ -144,16 +144,19 @@ impl Table {
 }
 
 /// Positive modulo, matching `wrap()` in `tilemap-common.h`.
-pub fn wrap_index(value: i32, range: i32) -> i32 {
+///
+/// `value` is wider than the map index so a scrolled tile coordinate can be
+/// wrapped without overflowing `i32`.
+pub(crate) fn wrap_index(value: i64, range: i32) -> i32 {
     if range <= 0 {
         return 0;
     }
-    let res = value % range;
+    let range = range as i64;
+    let mut res = value % range;
     if res < 0 {
-        res + range
-    } else {
-        res
+        res += range;
     }
+    res as i32
 }
 
 #[cfg(test)]

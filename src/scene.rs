@@ -770,17 +770,20 @@ impl Graphics {
             max_y = max_y.max(y);
         }
         let pad = sprite.wave_amp.abs() + 1.0;
-        let bounds = Rect::new(
-            finite_i32((min_x - pad).floor()),
-            finite_i32((min_y - pad).floor()),
-            finite_i32(((max_x - min_x) + pad * 2.0).ceil()).saturating_add(1),
-            finite_i32(((max_y - min_y) + pad * 2.0).ceil()).saturating_add(1),
-        );
-        let bounds = bounds.intersect(clip);
+        let left = (min_x - pad).floor();
+        let top = (min_y - pad).floor();
+        let right = left + ((max_x - min_x) + pad * 2.0).ceil() + 1.0;
+        let bottom = top + ((max_y - min_y) + pad * 2.0).ceil() + 1.0;
+        let Some((x0, x1)) = cover_pixels(left, right, clip.x, clip.right()) else {
+            return;
+        };
+        let Some((y0, y1)) = cover_pixels(top, bottom, clip.y, clip.bottom()) else {
+            return;
+        };
         let tone = sprite.tone.norm();
         let color = sprite.color.norm();
-        for y in bounds.y..bounds.bottom() {
-            for x in bounds.x..bounds.right() {
+        for y in y0..y1 {
+            for x in x0..x1 {
                 let Some((lx, ly)) = xf.to_local(x as f32 + 0.5, y as f32 + 0.5) else {
                     continue;
                 };
@@ -1017,12 +1020,13 @@ impl Graphics {
         if map.x_size() <= 0 || map.y_size() <= 0 || map.z_size() <= 0 {
             return;
         }
-        let tiles_x = clip.width / 32 + 3;
-        let tiles_y = clip.height / 32 + 3;
+        let tiles_x = clip.width as i64 / 32 + 3;
+        let tiles_y = clip.height as i64 / 32 + 3;
         // Viewport scroll lives in `origin_*`. The first visible column is
         // `(clip - origin + tilemap offset) / 32`, with one tile of margin.
-        let start_x = (clip.x - origin_x + tilemap.ox).div_euclid(32) - 1;
-        let start_y = (clip.y - origin_y + tilemap.oy).div_euclid(32) - 1;
+        // The sum is wider than `i32` so extreme scroll values do not wrap.
+        let start_x = tile_start(clip.x, origin_x, tilemap.ox);
+        let start_y = tile_start(clip.y, origin_y, tilemap.oy);
         let mut ground = Vec::new();
         let mut above = Vec::new();
         for ty in start_y..start_y + tiles_y {
@@ -1045,8 +1049,15 @@ impl Graphics {
                     if prio > 5 {
                         continue;
                     }
-                    let dest_x = origin_x + tx * 32 - tilemap.ox;
-                    let dest_y = origin_y + ty * 32 - tilemap.oy;
+                    let dest_x = origin_x as i64 + tx * 32 - tilemap.ox as i64;
+                    let dest_y = origin_y as i64 + ty * 32 - tilemap.oy as i64;
+                    if dest_x + 32 <= clip.x as i64
+                        || dest_y + 32 <= clip.y as i64
+                        || dest_x >= clip.right() as i64
+                        || dest_y >= clip.bottom() as i64
+                    {
+                        continue;
+                    }
                     let job = TileJob {
                         tile,
                         dest_x,
@@ -1061,7 +1072,7 @@ impl Graphics {
                 }
             }
         }
-        above.sort_by_key(|job| job.dest_y + job.prio as i32 * 32);
+        above.sort_by_key(|job| job.dest_y + job.prio as i64 * 32);
         for job in ground.into_iter().chain(above) {
             self.draw_tile(frame, tilemap, clip, job);
         }
@@ -1102,8 +1113,8 @@ impl Graphics {
                 let pattern = (job.tile % 48) as usize;
                 for corner in 0..4 {
                     let (sx, sy) = autotile_piece(pattern, corner);
-                    let dx = job.dest_x + if corner % 2 == 1 { 16 } else { 0 };
-                    let dy = job.dest_y + if corner >= 2 { 16 } else { 0 };
+                    let dx = job.dest_x + if corner % 2 == 1 { 16i64 } else { 0 };
+                    let dy = job.dest_y + if corner >= 2 { 16i64 } else { 0 };
                     paint_tile(
                         frame,
                         bitmap,
@@ -1154,8 +1165,8 @@ fn push_slot<T>(slots: &mut Vec<Slot<T>>, value: T) -> Handle {
 
 struct TileJob {
     tile: i32,
-    dest_x: i32,
-    dest_y: i32,
+    dest_x: i64,
+    dest_y: i64,
     prio: i16,
 }
 
@@ -1340,8 +1351,8 @@ struct TileBlit<'a> {
     frame: &'a mut Bitmap,
     source: &'a Bitmap,
     src: Rect,
-    x: i32,
-    y: i32,
+    x: i64,
+    y: i64,
     clip: Rect,
     opacity: i32,
     blend: i32,
@@ -1353,7 +1364,7 @@ fn paint_tile(
     frame: &mut Bitmap,
     source: &Bitmap,
     src: Rect,
-    at: (i32, i32),
+    at: (i64, i64),
     clip: Rect,
     tilemap: &Tilemap,
 ) {
@@ -1384,12 +1395,19 @@ fn blit_sprite_rect(args: TileBlit<'_>) {
         tone,
         color,
     } = args;
-    let rect = Rect::new(x, y, src.width, src.height).intersect(clip);
+    let Some(rect) = clip_tile(x, y, src.width, src.height, clip) else {
+        return;
+    };
     let tone = tone.norm();
     let color = color.norm();
     for py in rect.y..rect.bottom() {
         for px in rect.x..rect.right() {
-            let Some(sample) = pixel_of(source, src.x + (px - x), src.y + (py - y)) else {
+            let sx = src.x as i64 + (px as i64 - x);
+            let sy = src.y as i64 + (py as i64 - y);
+            let (Ok(sx), Ok(sy)) = (i32::try_from(sx), i32::try_from(sy)) else {
+                continue;
+            };
+            let Some(sample) = pixel_of(source, sx, sy) else {
                 continue;
             };
             if sample[3] == 0 {
@@ -1419,15 +1437,54 @@ fn blit_sprite_rect(args: TileBlit<'_>) {
     }
 }
 
-fn finite_i32(value: f32) -> i32 {
-    if !value.is_finite() {
-        return if value.is_sign_negative() {
-            i32::MIN
-        } else {
-            i32::MAX
-        };
+/// Integer pixels of `[start, end)` that also lie in `[clip_lo, clip_hi)`.
+///
+/// The float box is clipped before it is converted, so a zoomed sprite whose
+/// corners sit far outside the frame still covers the pixels it intersects.
+fn cover_pixels(start: f32, end: f32, clip_lo: i32, clip_hi: i32) -> Option<(i32, i32)> {
+    if clip_hi <= clip_lo || !start.is_finite() || !end.is_finite() || end <= start {
+        return None;
     }
-    value.clamp(-16_000_000.0, 16_000_000.0) as i32
+    let clip_lo = clip_lo as i64;
+    let clip_hi = clip_hi as i64;
+    let lo = if start <= i64::MIN as f32 {
+        clip_lo
+    } else {
+        (start.ceil() as i64).max(clip_lo)
+    };
+    let hi = if end >= i64::MAX as f32 {
+        clip_hi
+    } else {
+        (end.ceil() as i64).min(clip_hi)
+    };
+    if hi <= lo {
+        None
+    } else {
+        Some((lo as i32, hi as i32))
+    }
+}
+
+fn tile_start(clip: i32, origin: i32, offset: i32) -> i64 {
+    (clip as i64 - origin as i64 + offset as i64).div_euclid(32) - 1
+}
+
+fn clip_tile(x: i64, y: i64, width: i32, height: i32, clip: Rect) -> Option<Rect> {
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let left = x.max(clip.x as i64);
+    let top = y.max(clip.y as i64);
+    let right = x.saturating_add(width as i64).min(clip.right() as i64);
+    let bottom = y.saturating_add(height as i64).min(clip.bottom() as i64);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(Rect::new(
+        left as i32,
+        top as i32,
+        (right - left) as i32,
+        (bottom - top) as i32,
+    ))
 }
 
 fn apply_brightness(frame: &mut Bitmap, brightness: i32) {
@@ -1790,5 +1847,50 @@ mod tests {
         assert_eq!(actor.red, 255.0);
         let window = demo.graphics.frame().get_pixel(46, 14);
         assert!(window.green > 40.0, "{window:?}");
+    }
+
+    #[test]
+    fn huge_zoom_still_covers_pixels_inside_the_frame() {
+        let mut g = Graphics::new(2, 1, 1).unwrap();
+        let bmp = g.create_bitmap(2, 1).unwrap();
+        g.bitmap_mut(bmp)
+            .unwrap()
+            .fill_rect(Rect::new(0, 0, 2, 1), Color::rgb(255.0, 0.0, 0.0));
+        let sprite = g.create_sprite(None);
+        g.set_sprite_bitmap(sprite, Some(bmp)).unwrap();
+        {
+            let sprite = g.sprite_mut(sprite).unwrap();
+            sprite.ox = 1;
+            sprite.zoom_x = 30_000_000.0;
+        }
+        g.update().unwrap();
+        assert_eq!(g.frame().get_pixel(0, 0).red, 255.0);
+        assert_eq!(g.frame().get_pixel(1, 0).red, 255.0);
+    }
+
+    #[test]
+    fn tile_scroll_uses_a_wide_sum() {
+        assert_eq!(
+            tile_start(i32::MAX, i32::MIN, i32::MAX),
+            (i32::MAX as i64 - i32::MIN as i64 + i32::MAX as i64).div_euclid(32) - 1
+        );
+        let mut g = Graphics::new(32, 32, 1).unwrap();
+        let tileset = g.create_bitmap(32, 32).unwrap();
+        g.bitmap_mut(tileset)
+            .unwrap()
+            .fill_rect(Rect::new(0, 0, 32, 32), Color::rgb(0.0, 255.0, 0.0));
+        let mut map = Table::new(1, 1, 1).unwrap();
+        map.set(384, 0, 0, 0);
+        let view = g.create_viewport(Rect::new(0, 0, 32, 32));
+        g.viewport_mut(view).unwrap().ox = 100;
+        let tilemap = g.create_tilemap(Some(view));
+        {
+            let tm = g.tilemap_mut(tilemap).unwrap();
+            tm.tileset = Some(tileset);
+            tm.map_data = Some(map);
+            tm.ox = i32::MAX;
+        }
+        g.update().unwrap();
+        assert_eq!(g.frame().get_pixel(1, 1).green, 255.0);
     }
 }
