@@ -382,6 +382,8 @@ impl Graphics {
     }
 
     pub fn freeze(&mut self) -> Result<()> {
+        // Brightness is part of the captured frame, as in `compositeToBuffer`.
+        // Later fades present that frame as stored.
         let frame = self.composite()?;
         self.screen = frame.clone();
         self.frozen = Some(frame);
@@ -576,9 +578,7 @@ impl Graphics {
 
     fn present_fade(&mut self) -> Result<()> {
         if let Some(frozen) = self.frozen.clone() {
-            let mut frame = frozen;
-            apply_brightness(&mut frame, self.brightness);
-            self.screen = frame;
+            self.screen = frozen;
             self.frame_count += 1;
         } else {
             self.present_live()?;
@@ -755,10 +755,10 @@ impl Graphics {
         }
         let pad = sprite.wave_amp.abs() + 1.0;
         let bounds = Rect::new(
-            (min_x - pad).floor() as i32,
-            (min_y - pad).floor() as i32,
-            ((max_x - min_x) + pad * 2.0).ceil() as i32 + 1,
-            ((max_y - min_y) + pad * 2.0).ceil() as i32 + 1,
+            finite_i32((min_x - pad).floor()),
+            finite_i32((min_y - pad).floor()),
+            finite_i32(((max_x - min_x) + pad * 2.0).ceil()).saturating_add(1),
+            finite_i32(((max_y - min_y) + pad * 2.0).ceil()).saturating_add(1),
         );
         let bounds = bounds.intersect(clip);
         let tone = sprite.tone.norm();
@@ -1003,8 +1003,10 @@ impl Graphics {
         }
         let tiles_x = clip.width / 32 + 3;
         let tiles_y = clip.height / 32 + 3;
-        let start_x = tilemap.ox.div_euclid(32) - 1;
-        let start_y = tilemap.oy.div_euclid(32) - 1;
+        // Viewport scroll lives in `origin_*`. The first visible column is
+        // `(clip - origin + tilemap offset) / 32`, with one tile of margin.
+        let start_x = (clip.x - origin_x + tilemap.ox).div_euclid(32) - 1;
+        let start_y = (clip.y - origin_y + tilemap.oy).div_euclid(32) - 1;
         let mut ground = Vec::new();
         let mut above = Vec::new();
         for ty in start_y..start_y + tiles_y {
@@ -1398,6 +1400,17 @@ fn blit_sprite_rect(args: TileBlit<'_>) {
     }
 }
 
+fn finite_i32(value: f32) -> i32 {
+    if !value.is_finite() {
+        return if value.is_sign_negative() {
+            i32::MIN
+        } else {
+            i32::MAX
+        };
+    }
+    value.clamp(-16_000_000.0, 16_000_000.0) as i32
+}
+
 fn apply_brightness(frame: &mut Bitmap, brightness: i32) {
     let scale = brightness.clamp(0, 255) as f32 / 255.0;
     if scale >= 1.0 {
@@ -1665,6 +1678,46 @@ mod tests {
         g.tilemap_mut(tilemap).unwrap().ox = 32;
         g.update().unwrap();
         assert_eq!(g.frame().get_pixel(1, 1).red, 255.0, "autotile");
+    }
+
+    #[test]
+    fn tilemap_uses_the_viewport_scroll() {
+        let mut g = Graphics::new(64, 32, 1).unwrap();
+        let tileset = g.create_bitmap(32, 32).unwrap();
+        g.bitmap_mut(tileset)
+            .unwrap()
+            .fill_rect(Rect::new(0, 0, 32, 32), Color::rgb(0.0, 255.0, 0.0));
+        let mut map = Table::new(12, 1, 1).unwrap();
+        map.set(384, 10, 0, 0);
+        let view = g.create_viewport(Rect::new(0, 0, 64, 32));
+        g.viewport_mut(view).unwrap().ox = 320;
+        let tilemap = g.create_tilemap(Some(view));
+        {
+            let tm = g.tilemap_mut(tilemap).unwrap();
+            tm.tileset = Some(tileset);
+            tm.map_data = Some(map);
+        }
+        g.update().unwrap();
+        assert_eq!(g.frame().get_pixel(1, 1).green, 255.0);
+    }
+
+    #[test]
+    fn frozen_fade_does_not_darken_the_captured_frame_twice() {
+        let mut g = Graphics::new(1, 1, 1).unwrap();
+        let bmp = g.create_bitmap(1, 1).unwrap();
+        g.bitmap_mut(bmp)
+            .unwrap()
+            .fill_rect(Rect::new(0, 0, 1, 1), Color::rgb(255.0, 255.0, 255.0));
+        let sprite = g.create_sprite(None);
+        g.set_sprite_bitmap(sprite, Some(bmp)).unwrap();
+        g.brightness = 128;
+        g.update().unwrap();
+        let shown = g.frame().get_pixel(0, 0).red;
+        assert!((shown - 128.0).abs() < 1.0, "{shown}");
+        g.freeze().unwrap();
+        g.fadeout(1).unwrap();
+        let faded = g.frame().get_pixel(0, 0).red;
+        assert!((faded - shown).abs() < 1.0, "{faded}");
     }
 
     #[test]

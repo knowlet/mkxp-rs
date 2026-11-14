@@ -267,8 +267,13 @@ impl Config {
             return;
         }
         let ini_path = dir.join(format!("{}.ini", self.exec_name));
-        match fs::read_to_string(&ini_path) {
-            Ok(text) => {
+        match fs::read(&ini_path) {
+            Ok(bytes) => {
+                // Game.ini titles are often legacy bytes. Decode the file
+                // without dropping ASCII keys such as Scripts when Title is
+                // not UTF-8. Invalid bytes become Latin-1 characters, which
+                // is what a Western RPG Maker title uses for bytes such as 0xE9.
+                let text = decode_ini_bytes(&bytes);
                 let ini = parse_ini(&text);
                 if let Some(title) = ini.get("game.title") {
                     self.game_title = title.clone();
@@ -318,6 +323,29 @@ fn game_directory(config_dir: &Path, game_folder: &str) -> std::path::PathBuf {
     } else {
         config_dir.join(folder)
     }
+}
+
+fn decode_ini_bytes(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match std::str::from_utf8(&bytes[index..]) {
+            Ok(text) => {
+                out.push_str(text);
+                break;
+            }
+            Err(err) => {
+                let valid = err.valid_up_to();
+                out.push_str(std::str::from_utf8(&bytes[index..index + valid]).unwrap());
+                index += valid;
+                if index < bytes.len() {
+                    out.push(bytes[index] as char);
+                    index += 1;
+                }
+            }
+        }
+    }
+    out
 }
 
 fn guess_version(scripts: &str) -> i32 {
@@ -735,6 +763,22 @@ mod tests {
         .unwrap();
         let config = Config::load_dir(&dir, &[]);
         assert_eq!(config.game_title, "Nested");
+        assert_eq!(config.game_scripts, "Data/Scripts.rvdata2");
+        assert_eq!(config.rgss_version, 3);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_ini_title_keeps_the_scripts_path() {
+        let dir = std::env::temp_dir().join(format!("mkxpz-ini-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut bytes = b"[Game]\nTitle=Caf".to_vec();
+        bytes.push(0xE9);
+        bytes.extend_from_slice(b"\nScripts=Data/Scripts.rvdata2\n");
+        fs::write(dir.join("Game.ini"), bytes).unwrap();
+        let config = Config::load_dir(&dir, &[]);
+        assert_eq!(config.game_title, "Café");
         assert_eq!(config.game_scripts, "Data/Scripts.rvdata2");
         assert_eq!(config.rgss_version, 3);
         let _ = fs::remove_dir_all(&dir);

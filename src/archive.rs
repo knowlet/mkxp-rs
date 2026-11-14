@@ -243,12 +243,30 @@ impl Archive {
     }
 
     /// Build a version 1 or 3 archive. `version` must be 1, 2, or 3.
+    /// Offsets and sizes that do not fit the format's 32-bit fields are an error.
     pub fn pack(version: u8, files: &[(&str, &[u8])]) -> Result<Vec<u8>> {
         match version {
-            1 | 2 => Ok(pack_v1(version, files)),
-            3 => Ok(pack_v3(files)),
+            1 | 2 => pack_v1(version, files),
+            3 => pack_v3(files),
             other => Err(Error::new(format!("cannot pack RGSS version {other}"))),
         }
+    }
+
+    /// Write every entry under `root`. Existing symlinks in the destination
+    /// are rejected so an entry cannot be redirected outside `root`.
+    pub fn extract_to(&self, root: &Path) -> Result<()> {
+        if let Ok(meta) = std::fs::symlink_metadata(root) {
+            if meta.file_type().is_symlink() {
+                return Err(Error::new(
+                    "refusing to extract through a symlink destination",
+                ));
+            }
+        }
+        std::fs::create_dir_all(root).map_err(|err| Error::new(err.to_string()))?;
+        for name in self.files() {
+            write_extracted(root, name, &self.read(name)?)?;
+        }
+        Ok(())
     }
 }
 
@@ -391,7 +409,7 @@ fn encrypt_body(data: &[u8], magic: u32) -> Vec<u8> {
     decrypt(data, magic, 0)
 }
 
-fn pack_v1(version: u8, files: &[(&str, &[u8])]) -> Vec<u8> {
+fn pack_v1(version: u8, files: &[(&str, &[u8])]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     out.extend_from_slice(HEADER);
     out.push(0);
@@ -400,20 +418,20 @@ fn pack_v1(version: u8, files: &[(&str, &[u8])]) -> Vec<u8> {
     for (name, data) in files {
         let name = normalize_name(name);
         let name_bytes = name.as_bytes();
-        let enc_len = (name_bytes.len() as u32) ^ advance(&mut magic);
+        let enc_len = as_u32(name_bytes.len(), "archive name")? ^ advance(&mut magic);
         out.extend_from_slice(&enc_len.to_le_bytes());
         for &byte in name_bytes {
             let key = advance(&mut magic) as u8;
             out.push(byte ^ key);
         }
-        let enc_size = (data.len() as u32) ^ advance(&mut magic);
+        let enc_size = as_u32(data.len(), "archive file")? ^ advance(&mut magic);
         out.extend_from_slice(&enc_size.to_le_bytes());
         out.extend_from_slice(&encrypt_body(data, magic));
     }
-    out
+    Ok(out)
 }
 
-fn pack_v3(files: &[(&str, &[u8])]) -> Vec<u8> {
+fn pack_v3(files: &[(&str, &[u8])]) -> Result<Vec<u8>> {
     let base_key: u32 = 0x00C0_FFEE;
     let base_magic = base_key.wrapping_mul(9).wrapping_add(3);
     let mut dir = Vec::new();
@@ -424,32 +442,87 @@ fn pack_v3(files: &[(&str, &[u8])]) -> Vec<u8> {
 
     let mut bodies = Vec::new();
     let mut cursor = 0usize;
-    // Directory size is known once names are known: 12 byte header + records + 4 byte terminator.
-    let dir_len = 12
-        + files
-            .iter()
-            .map(|(name, _)| 16 + normalize_name(name).len())
-            .sum::<usize>()
-        + 4;
+    // 8 byte header + 4 byte key + one 16-byte record per file + names + 4 byte terminator.
+    let mut dir_len = 16usize;
+    for (name, _) in files {
+        let name_len = as_u32(normalize_name(name).len(), "archive name")? as usize;
+        dir_len = dir_len
+            .checked_add(16)
+            .and_then(|sum| sum.checked_add(name_len))
+            .ok_or_else(|| Error::new("archive directory is too large"))?;
+    }
     for (index, (name, data)) in files.iter().enumerate() {
         let name = normalize_name(name);
-        let offset = (dir_len + cursor) as u32;
-        let file_magic = 0x1000_0000u32.wrapping_add(index as u32);
+        let offset = checked_sum(dir_len, cursor)?;
+        let file_magic = 0x1000_0000u32.wrapping_add(as_u32(index, "archive file count")?);
+        let size = as_u32(data.len(), "archive file")?;
+        let name_len = as_u32(name.len(), "archive name")?;
         dir.extend_from_slice(&(offset ^ base_magic).to_le_bytes());
-        dir.extend_from_slice(&((data.len() as u32) ^ base_magic).to_le_bytes());
+        dir.extend_from_slice(&(size ^ base_magic).to_le_bytes());
         dir.extend_from_slice(&(file_magic ^ base_magic).to_le_bytes());
-        dir.extend_from_slice(&((name.len() as u32) ^ base_magic).to_le_bytes());
+        dir.extend_from_slice(&(name_len ^ base_magic).to_le_bytes());
         for (i, byte) in name.bytes().enumerate() {
             dir.push(byte ^ ((base_magic >> (8 * (i % 4))) & 0xFF) as u8);
         }
         bodies.extend_from_slice(&encrypt_body(data, file_magic));
-        cursor += data.len();
+        cursor = cursor
+            .checked_add(data.len())
+            .ok_or_else(|| Error::new("archive offset overflow"))?;
     }
     // A zero offset, xored with the key, is the directory terminator.
     dir.extend_from_slice(&base_magic.to_le_bytes());
     debug_assert_eq!(dir.len(), dir_len);
     dir.extend_from_slice(&bodies);
-    dir
+    Ok(dir)
+}
+
+fn as_u32(value: usize, what: &str) -> Result<u32> {
+    u32::try_from(value).map_err(|_| Error::new(format!("{what} does not fit in an RGSS archive")))
+}
+
+fn checked_sum(left: usize, right: usize) -> Result<u32> {
+    as_u32(
+        left.checked_add(right)
+            .ok_or_else(|| Error::new("archive offset overflow"))?,
+        "archive offset",
+    )
+}
+
+fn write_extracted(root: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    let normalized = normalize_name(name);
+    Archive::destination_path(root, name)?;
+    let mut current = root.to_path_buf();
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    for (index, part) in parts.iter().enumerate() {
+        current.push(part);
+        let last = index + 1 == parts.len();
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(Error::new(format!(
+                    "refusing to extract through a symlink: {name}"
+                )));
+            }
+            Ok(meta) if last && meta.is_dir() => {
+                return Err(Error::new(format!("archive entry is not a file: {name}")));
+            }
+            Ok(meta) if !last && !meta.is_dir() => {
+                return Err(Error::new(format!(
+                    "archive entry parent is not a directory: {name}"
+                )));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                if !last {
+                    std::fs::create_dir(&current).map_err(|err| Error::new(err.to_string()))?;
+                }
+            }
+            Err(err) => return Err(Error::new(err.to_string())),
+        }
+    }
+    std::fs::write(&current, bytes).map_err(|err| Error::new(err.to_string()))
 }
 
 #[cfg(test)]
@@ -502,5 +575,36 @@ mod tests {
         }
         advance_n(&mut jumped, 1000);
         assert_eq!(stepped, jumped);
+    }
+
+    #[test]
+    fn archive_fields_reject_values_past_u32() {
+        let too_big = (u32::MAX as usize).saturating_add(1);
+        assert!(as_u32(too_big, "archive offset").is_err());
+        assert!(checked_sum(usize::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn extract_refuses_to_follow_a_destination_symlink() {
+        let dir = std::env::temp_dir().join(format!("mkxpz-extract-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dest = dir.join("out");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, dest.join("Data")).unwrap();
+        let packed = Archive::pack(1, &[("Data/settings.ini", b"secret")]).unwrap();
+        let archive = Archive::open(packed).unwrap();
+        assert!(archive.extract_to(&dest).is_err());
+        assert!(!outside.join("settings.ini").exists());
+
+        let ok = dir.join("plain");
+        let packed = Archive::pack(1, &[("Data/settings.ini", b"secret")]).unwrap();
+        Archive::open(packed).unwrap().extract_to(&ok).unwrap();
+        assert_eq!(
+            std::fs::read(ok.join("Data").join("settings.ini")).unwrap(),
+            b"secret"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

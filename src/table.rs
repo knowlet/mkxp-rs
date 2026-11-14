@@ -83,11 +83,13 @@ impl Table {
         let x_copy = x.min(self.x);
         let y_copy = y.min(self.y);
         let z_copy = z.min(self.z);
-        for kz in 0..z_copy {
-            for jy in 0..y_copy {
-                for ix in 0..x_copy {
-                    let value = self.get(ix, jy, kz).unwrap_or(0);
-                    next.set(value, ix, jy, kz);
+        if x_copy > 0 && y_copy > 0 && z_copy > 0 {
+            for kz in 0..z_copy {
+                for jy in 0..y_copy {
+                    for ix in 0..x_copy {
+                        let value = self.get(ix, jy, kz).unwrap_or(0);
+                        next.set(value, ix, jy, kz);
+                    }
                 }
             }
         }

@@ -262,6 +262,16 @@ impl Input {
                 target: Button::MouseRight,
                 repeatable: false,
             },
+            Binding {
+                key: "mouse_x1",
+                target: Button::MouseX1,
+                repeatable: false,
+            },
+            Binding {
+                key: "mouse_x2",
+                target: Button::MouseX2,
+                repeatable: false,
+            },
         ];
         if rgss_version <= 1 {
             bindings.push(Binding {
@@ -598,6 +608,9 @@ mod tests {
         assert!(modifiers.is_pressed(Button::Ctrl));
         assert!(modifiers.is_pressed(Button::Alt));
         assert!(modifiers.is_pressed(Button::F5));
+        modifiers.set_mouse_button(4, true);
+        modifiers.update();
+        assert!(modifiers.is_pressed(Button::MouseX1));
     }
 
     #[test]

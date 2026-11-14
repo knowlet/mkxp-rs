@@ -190,14 +190,19 @@ fn lookup_archive(archive: &Archive, logical: &str, supplement: bool) -> Option<
 }
 
 fn extension_match(candidate: &str, requested: &str) -> bool {
-    let candidate = candidate.as_bytes();
-    let requested = requested.as_bytes();
+    // PhysFS enumerates one directory. A nested name such as
+    // `face.backup/old.png` is not an extension of `face`.
+    if parent_logical(candidate) != parent_logical(requested) {
+        return false;
+    }
+    let candidate = file_logical(candidate).into_bytes();
+    let requested = file_logical(requested).into_bytes();
     if candidate.len() <= requested.len() {
         return false;
     }
     candidate
         .get(..requested.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(requested))
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&requested))
         && candidate[requested.len()] == b'.'
 }
 
@@ -257,5 +262,22 @@ mod tests {
         fs.mount_archive_bytes(packed).unwrap();
         assert!(fs.exists("data/system.rxdata"));
         assert_eq!(fs.read("Data/System.rxdata").unwrap(), b"system");
+    }
+
+    #[test]
+    fn extension_supplement_stays_in_the_requested_directory() {
+        let packed = Archive::pack(
+            1,
+            &[
+                ("Graphics/face.backup/old.png", b"nested"),
+                ("Graphics/face.png", b"sibling"),
+            ],
+        )
+        .unwrap();
+        let mut fs = FileSystem::new(true);
+        fs.mount_archive_bytes(packed).unwrap();
+        let (name, bytes) = fs.read_with_extension("Graphics/face").unwrap();
+        assert_eq!(name, "Graphics/face.png");
+        assert_eq!(bytes, b"sibling");
     }
 }
