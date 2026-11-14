@@ -912,8 +912,9 @@ impl Graphics {
         };
         if let Some(handle) = window.windowskin {
             if let Ok(skin) = self.bitmap(handle) {
-                let back = combine_opacity(window.back_opacity, window.opacity);
-                let frame_op = window.opacity.clamp(0, 255);
+                // Background keeps `back_opacity` only. The frame is composited
+                // at full strength, and `opacity` is applied once to that result.
+                let back = window.back_opacity.clamp(0, 255);
                 let bg = Rect::new(2, 2, window.width - 4, window.height - 4);
                 if window.stretch {
                     skin_target.stretch_blt(bg, skin, Rect::new(0, 0, 128, 128), back, false);
@@ -925,28 +926,28 @@ impl Graphics {
                     Rect::new(8, 0, window.width - 16, 16),
                     skin,
                     Rect::new(144, 0, 32, 16),
-                    frame_op,
+                    255,
                 );
                 blit_tiled(
                     &mut skin_target,
                     Rect::new(8, window.height - 16, window.width - 16, 16),
                     skin,
                     Rect::new(144, 48, 32, 16),
-                    frame_op,
+                    255,
                 );
                 blit_tiled(
                     &mut skin_target,
                     Rect::new(0, 8, 16, window.height - 16),
                     skin,
                     Rect::new(128, 16, 16, 32),
-                    frame_op,
+                    255,
                 );
                 blit_tiled(
                     &mut skin_target,
                     Rect::new(window.width - 16, 8, 16, window.height - 16),
                     skin,
                     Rect::new(176, 16, 16, 32),
-                    frame_op,
+                    255,
                 );
                 let corners = [
                     (0, 0, 128, 0),
@@ -955,52 +956,80 @@ impl Graphics {
                     (window.width - 16, window.height - 16, 176, 48),
                 ];
                 for (dx, dy, sx, sy) in corners {
-                    skin_target.blt(dx, dy, skin, Rect::new(sx, sy, 16, 16), frame_op);
+                    skin_target.blt(dx, dy, skin, Rect::new(sx, sy, 16, 16), 255);
                 }
+            }
+        }
+        let window_x = origin_x + window.x;
+        let window_y = origin_y + window.y;
+        stamp(
+            frame,
+            &skin_target,
+            window_x,
+            window_y,
+            clip,
+            window.opacity,
+        );
+        if let Some(handle) = window.windowskin {
+            if let Ok(skin) = self.bitmap(handle) {
                 if window.cursor_rect.width > 0 && window.cursor_rect.height > 0 {
                     let alpha = CURSOR_ALPHA[window.cursor_count as usize % CURSOR_ALPHA.len()];
-                    skin_target.stretch_blt(
-                        Rect::new(
-                            window.cursor_rect.x + 16,
-                            window.cursor_rect.y + 16,
-                            window.cursor_rect.width,
-                            window.cursor_rect.height,
-                        ),
-                        skin,
-                        Rect::new(128, 64, 32, 32),
-                        alpha as i32,
-                        false,
-                    );
+                    if let Ok(mut cursor) =
+                        Bitmap::new(window.cursor_rect.width, window.cursor_rect.height)
+                    {
+                        cursor.stretch_blt(
+                            cursor.rect(),
+                            skin,
+                            Rect::new(128, 64, 32, 32),
+                            alpha as i32,
+                            false,
+                        );
+                        stamp(
+                            frame,
+                            &cursor,
+                            window_x + window.cursor_rect.x + 16,
+                            window_y + window.cursor_rect.y + 16,
+                            clip,
+                            255,
+                        );
+                    }
                 }
                 if window.pause {
                     let frame_i = (window.cursor_count / 8) as usize % PAUSE_SRC.len();
                     let (sx, sy) = PAUSE_SRC[frame_i];
-                    let dx = (window.width - 16) / 2;
-                    let dy = window.height - 16;
-                    skin_target.blt(dx, dy, skin, Rect::new(sx, sy, 16, 16), 255);
+                    if let Ok(mut pause) = Bitmap::new(16, 16) {
+                        pause.blt(0, 0, skin, Rect::new(sx, sy, 16, 16), 255);
+                        stamp(
+                            frame,
+                            &pause,
+                            window_x + (window.width - 16) / 2,
+                            window_y + window.height - 16,
+                            clip,
+                            255,
+                        );
+                    }
                 }
             }
         }
         if let Some(handle) = window.contents {
             if let Ok(contents) = self.bitmap(handle) {
-                let dest = Rect::new(16, 16, window.width - 32, window.height - 32);
+                let dest = Rect::new(
+                    window_x + 16,
+                    window_y + 16,
+                    window.width - 32,
+                    window.height - 32,
+                );
                 let src = Rect::new(window.ox, window.oy, dest.width, dest.height);
                 blit_clipped(
-                    &mut skin_target,
+                    frame,
                     dest,
                     contents,
                     src,
                     window.contents_opacity.clamp(0, 255),
+                    clip,
                 );
             }
         }
-        stamp(
-            frame,
-            &skin_target,
-            origin_x + window.x,
-            origin_y + window.y,
-            clip,
-        );
     }
 
     fn draw_tilemap(
@@ -1263,10 +1292,6 @@ fn put_pixel(bitmap: &mut Bitmap, x: i32, y: i32, px: [u8; 4]) {
     bitmap.set_pixel(x, y, Color::from_rgba8(px));
 }
 
-fn combine_opacity(back: i32, frame: i32) -> i32 {
-    ((back.clamp(0, 255) * frame.clamp(0, 255)) / 255).clamp(0, 255)
-}
-
 fn blit_tiled(
     dest: &mut Bitmap,
     dest_rect: Rect,
@@ -1306,6 +1331,7 @@ fn blit_clipped(
     source: &Bitmap,
     source_rect: Rect,
     opacity: i32,
+    clip: Rect,
 ) {
     if dest_rect.width <= 0 || dest_rect.height <= 0 {
         return;
@@ -1327,16 +1353,32 @@ fn blit_clipped(
         Err(_) => return,
     };
     temp.blt(0, 0, source, src, opacity);
-    stamp(dest, &temp, dest_rect.x, dest_rect.y, dest.rect());
+    // `blt` keeps straight alpha. One sprite blend onto the framebuffer then
+    // applies that alpha a single time.
+    stamp(
+        dest,
+        &temp,
+        dest_rect.x,
+        dest_rect.y,
+        clip.intersect(dest.rect()),
+        255,
+    );
 }
 
-fn stamp(dest: &mut Bitmap, source: &Bitmap, x: i32, y: i32, clip: Rect) {
+fn stamp(dest: &mut Bitmap, source: &Bitmap, x: i32, y: i32, clip: Rect, opacity: i32) {
+    let opacity = opacity.clamp(0, 255);
+    if opacity == 0 {
+        return;
+    }
     let rect = Rect::new(x, y, source.width(), source.height()).intersect(clip);
     for py in rect.y..rect.bottom() {
         for px in rect.x..rect.right() {
-            let Some(src) = pixel_of(source, px - x, py - y) else {
+            let Some(mut src) = pixel_of(source, px - x, py - y) else {
                 continue;
             };
+            if opacity != 255 {
+                src[3] = ((src[3] as u16 * opacity as u16) / 255) as u8;
+            }
             if src[3] == 0 {
                 continue;
             }
@@ -1892,5 +1934,44 @@ mod tests {
         }
         g.update().unwrap();
         assert_eq!(g.frame().get_pixel(1, 1).green, 255.0);
+    }
+
+    #[test]
+    fn window_opacity_is_applied_once() {
+        let mut g = Graphics::new(64, 64, 1).unwrap();
+        let contents = g.create_bitmap(16, 16).unwrap();
+        g.bitmap_mut(contents)
+            .unwrap()
+            .fill_rect(Rect::new(0, 0, 16, 16), Color::rgb(255.0, 255.0, 255.0));
+        let window = g.create_window(None);
+        {
+            let window = g.window_mut(window).unwrap();
+            window.width = 48;
+            window.height = 48;
+            window.contents = Some(contents);
+            window.contents_opacity = 128;
+        }
+        g.update().unwrap();
+        let red = g.frame().get_pixel(16, 16).red;
+        assert!((red - 128.0).abs() < 1.0, "contents {red}");
+
+        let skin = g.create_bitmap(192, 128).unwrap();
+        g.bitmap_mut(skin)
+            .unwrap()
+            .fill_rect(Rect::new(0, 0, 192, 128), Color::rgb(255.0, 255.0, 255.0));
+        {
+            let window = g.window_mut(window).unwrap();
+            window.contents = None;
+            window.windowskin = Some(skin);
+            window.width = 64;
+            window.height = 64;
+            window.opacity = 128;
+            window.back_opacity = 255;
+        }
+        g.update().unwrap();
+        let center = g.frame().get_pixel(32, 32).red;
+        let edge = g.frame().get_pixel(10, 4).red;
+        assert!((center - 128.0).abs() < 1.0, "center {center}");
+        assert!((edge - 128.0).abs() < 1.0, "edge {edge}");
     }
 }
