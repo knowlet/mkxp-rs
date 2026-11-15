@@ -268,7 +268,8 @@ impl Bitmap {
             return;
         }
         let turns = wrap_range(hue, 0, 360) as f32 / 360.0;
-        for px in self.pixels.chunks_exact_mut(4) {
+        let (pixels, _) = self.pixels.as_chunks_mut::<4>();
+        for px in pixels {
             let rgb = [
                 px[0] as f32 / 255.0,
                 px[1] as f32 / 255.0,
@@ -377,6 +378,7 @@ impl Bitmap {
                 y: y + 1,
                 step,
                 scale,
+                squeeze,
                 clip,
                 color: outline,
             });
@@ -389,6 +391,7 @@ impl Bitmap {
                     y: y + oy,
                     step,
                     scale,
+                    squeeze,
                     clip,
                     color: outline,
                 });
@@ -400,6 +403,7 @@ impl Bitmap {
             y,
             step,
             scale,
+            squeeze,
             clip,
             color: ink,
         });
@@ -412,6 +416,7 @@ impl Bitmap {
             y,
             step,
             scale,
+            squeeze,
             clip,
             color,
         } = *paint;
@@ -426,7 +431,8 @@ impl Bitmap {
                     }
                     for sy in 0..scale {
                         for sx in 0..scale {
-                            let px = glyph_x + col * scale + sx;
+                            let src_x = col * scale + sx;
+                            let px = glyph_x + (src_x as f32 * squeeze).floor() as i32;
                             let py = y + row as i32 * scale + sy;
                             if !clip.contains(px, py) {
                                 continue;
@@ -443,7 +449,8 @@ impl Bitmap {
 
     pub fn to_ppm(&self) -> Vec<u8> {
         let mut out = format!("P6\n{} {}\n255\n", self.width, self.height).into_bytes();
-        for px in self.pixels.chunks_exact(4) {
+        let (pixels, _) = self.pixels.as_chunks::<4>();
+        for px in pixels {
             let a = px[3] as f32 / 255.0;
             for channel in &px[..3] {
                 out.push((*channel as f32 * a).round().clamp(0.0, 255.0) as u8);
@@ -489,6 +496,7 @@ struct TextPaint<'a> {
     y: i32,
     step: f32,
     scale: i32,
+    squeeze: f32,
     clip: Rect,
     color: Color,
 }
@@ -779,8 +787,24 @@ mod tests {
         bmp.font.shadow = false;
         bmp.font.color = Color::rgb(255.0, 255.0, 255.0);
         bmp.draw_text(Rect::new(0, 0, 40, 20), "A", 1);
-        assert!(bmp.pixels().iter().any(|&c| c == 255));
+        assert!(bmp.pixels().contains(&255));
         let size = bmp.text_size("A");
         assert!(size.width > 0 && size.height > 0);
+    }
+
+    #[test]
+    fn draw_text_squeeze_scales_glyph_pixels() {
+        let mut bmp = Bitmap::new(6, 20).unwrap();
+        bmp.font.size = 20;
+        bmp.font.outline = false;
+        bmp.font.shadow = false;
+        bmp.font.color = Color::new(255.0, 255.0, 255.0, 255.0);
+        assert_eq!(bmp.text_size("A").width, 12);
+        bmp.draw_text(Rect::new(0, 0, 6, 20), "A", 0);
+        // The top stroke of "A" is the middle column. At squeeze 0.5 it lands
+        // on x=2, still on the first row. The right stroke of the second row
+        // used to be clipped away (alpha 0) because only the advance shrank.
+        assert_eq!(bmp.get_pixel(2, 0).alpha, 255.0);
+        assert_eq!(bmp.get_pixel(4, 4).alpha, 255.0);
     }
 }

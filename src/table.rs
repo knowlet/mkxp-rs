@@ -136,8 +136,9 @@ impl Table {
             return Err(Error::new("Marshal: Table: bad file format"));
         }
         let mut table = Self::new(x, y, z)?;
-        for (i, chunk) in data[20..].chunks_exact(2).enumerate() {
-            table.data[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
+        let (chunks, _) = data[20..].as_chunks::<2>();
+        for (i, chunk) in chunks.iter().enumerate() {
+            table.data[i] = i16::from_le_bytes(*chunk);
         }
         Ok(table)
     }

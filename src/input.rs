@@ -406,7 +406,7 @@ impl Input {
             self.repeat_count += 1;
             let repeated = self.repeat_count >= self.repeat_start
                 && self.repeat_delay > 0
-                && (self.repeat_count + 1) % self.repeat_delay == 0;
+                && (self.repeat_count + 1).is_multiple_of(self.repeat_delay);
             if repeated {
                 self.states[self.repeating.index()].repeated = true;
             }

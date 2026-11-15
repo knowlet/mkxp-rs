@@ -80,37 +80,37 @@ impl FileSystem {
     }
 
     pub fn read(&self, path: &str) -> Result<Vec<u8>> {
-        self.lookup(path, false)
+        self.lookup(path, false)?
             .ok_or_else(|| Error::new(format!("file not found: {path}")))
     }
 
     /// Like `read`, but also accepts `name.ext` when the caller asked for `name`.
     pub fn read_with_extension(&self, path: &str) -> Result<(String, Vec<u8>)> {
-        self.lookup_named(path, true)
+        self.lookup_named(path, true)?
             .ok_or_else(|| Error::new(format!("file not found: {path}")))
     }
 
-    fn lookup(&self, path: &str, supplement: bool) -> Option<Vec<u8>> {
-        self.lookup_named(path, supplement).map(|(_, bytes)| bytes)
+    fn lookup(&self, path: &str, supplement: bool) -> Result<Option<Vec<u8>>> {
+        Ok(self.lookup_named(path, supplement)?.map(|(_, bytes)| bytes))
     }
 
-    fn lookup_named(&self, path: &str, supplement: bool) -> Option<(String, Vec<u8>)> {
+    fn lookup_named(&self, path: &str, supplement: bool) -> Result<Option<(String, Vec<u8>)>> {
         let logical = normalize_logical(path);
         for mount in &self.mounts {
             match mount {
                 Mount::Dir { root } => match self.lookup_dir(root, &logical, supplement) {
-                    Some(Some(found)) => return Some(found),
-                    Some(None) => return None,
+                    Some(Some(found)) => return Ok(Some(found)),
+                    Some(None) => return Ok(None),
                     None => {}
                 },
                 Mount::Archive(archive) => {
-                    if let Some(found) = lookup_archive(archive, &logical, supplement) {
-                        return Some(found);
+                    if let Some(found) = lookup_archive(archive, &logical, supplement)? {
+                        return Ok(Some(found));
                     }
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     fn lookup_dir(
@@ -212,10 +212,11 @@ impl FileSystem {
     }
 }
 
-fn lookup_archive(archive: &Archive, logical: &str, supplement: bool) -> Option<(String, Vec<u8>)> {
-    if let Ok(bytes) = archive.read(logical) {
-        return Some((logical.to_string(), bytes));
-    }
+fn lookup_archive(
+    archive: &Archive,
+    logical: &str,
+    supplement: bool,
+) -> Result<Option<(String, Vec<u8>)>> {
     let wanted = logical.to_ascii_lowercase();
     let mut exact = None;
     let mut extra = None;
@@ -229,9 +230,13 @@ fn lookup_archive(archive: &Archive, logical: &str, supplement: bool) -> Option<
             extra = Some(name.to_string());
         }
     }
-    let name = exact.or(extra)?;
-    let bytes = archive.read(&name).ok()?;
-    Some((name, bytes))
+    let Some(name) = exact.or(extra) else {
+        return Ok(None);
+    };
+    // A matching entry that cannot be decoded is corrupt. Do not continue
+    // into a lower-priority mount and return that older copy.
+    let bytes = archive.read(&name)?;
+    Ok(Some((name, bytes)))
 }
 
 fn extension_match(candidate: &str, requested: &str) -> bool {
@@ -324,5 +329,24 @@ mod tests {
         let (name, bytes) = fs.read_with_extension("Graphics/face").unwrap();
         assert_eq!(name, "Graphics/face.png");
         assert_eq!(bytes, b"sibling");
+    }
+
+    #[test]
+    fn corrupt_archive_entry_does_not_fall_through() {
+        let mut broken = Archive::pack(3, &[("Data/System.rxdata", b"new")]).unwrap();
+        broken.pop();
+        let direct = Archive::open(broken.clone()).unwrap();
+        let direct_err = direct.read("Data/System.rxdata").unwrap_err();
+        assert!(direct_err
+            .to_string()
+            .contains("extends past the end of the file"));
+
+        let older = Archive::pack(3, &[("Data/System.rxdata", b"old")]).unwrap();
+        let mut fs = FileSystem::new(true);
+        fs.mount_archive_bytes(broken).unwrap();
+        fs.mount_archive_bytes(older).unwrap();
+        let err = fs.read("Data/System.rxdata").unwrap_err();
+        assert!(err.to_string().contains("extends past the end of the file"));
+        assert!(!err.to_string().contains("old"));
     }
 }

@@ -402,7 +402,7 @@ impl Json {
     fn as_i32(&self) -> Option<i32> {
         match self {
             Json::Number(v)
-                if v.fract() == 0.0 && *v >= i32::MIN as f64 && *v <= i32::MAX as f64 =>
+                if v.fract() == 0.0 && (i32::MIN as f64..=i32::MAX as f64).contains(v) =>
             {
                 Some(*v as i32)
             }

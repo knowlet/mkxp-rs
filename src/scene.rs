@@ -297,7 +297,10 @@ impl Tilemap {
 enum Kind {
     Sprite(usize),
     Plane(usize),
-    Window(usize),
+    /// Window frame. Drawn at the window's z.
+    WindowBase(usize),
+    /// Cursor, pause icon, and contents. Drawn at z + 2.
+    WindowControls(usize),
     Tilemap(usize),
     Viewport(usize),
 }
@@ -645,7 +648,13 @@ impl Graphics {
                         z: window.z,
                         y: 0,
                         creation: window.creation,
-                        kind: Kind::Window(index),
+                        kind: Kind::WindowBase(index),
+                    });
+                    items.push(Item {
+                        z: window.z.saturating_add(2),
+                        y: 0,
+                        creation: window.creation,
+                        kind: Kind::WindowControls(index),
                     });
                 }
             }
@@ -695,9 +704,14 @@ impl Graphics {
                         self.draw_plane(frame, plane, clip, origin_x, origin_y);
                     }
                 }
-                Kind::Window(index) => {
+                Kind::WindowBase(index) => {
                     if let Some(window) = self.windows[index].value.as_ref() {
-                        self.draw_window(frame, window, clip, origin_x, origin_y);
+                        self.draw_window(frame, window, clip, origin_x, origin_y, false);
+                    }
+                }
+                Kind::WindowControls(index) => {
+                    if let Some(window) = self.windows[index].value.as_ref() {
+                        self.draw_window(frame, window, clip, origin_x, origin_y, true);
                     }
                 }
                 Kind::Tilemap(index) => {
@@ -826,8 +840,13 @@ impl Graphics {
                     rgb = [1.0 - rgb[0], 1.0 - rgb[1], 1.0 - rgb[2]];
                 }
                 let mut alpha = sample[3] as f32 * (sprite.opacity.clamp(0, 255) as f32 / 255.0);
-                if sprite.bush_depth > 0 && iy >= src_h as i32 - sprite.bush_depth {
-                    alpha *= sprite.bush_opacity.clamp(0, 255) as f32 / 255.0;
+                // `bush_depth` is a display-pixel distance from the transformed
+                // bottom edge, so zoom (and the inverse local Y) scale it.
+                if sprite.bush_depth > 0 && sprite.zoom_y != 0.0 {
+                    let boundary = src_h - sprite.bush_depth as f32 / sprite.zoom_y;
+                    if ly >= boundary {
+                        alpha *= sprite.bush_opacity.clamp(0, 255) as f32 / 255.0;
+                    }
                 }
                 let rgb = quantize_rgb(rgb);
                 let src = [
@@ -867,8 +886,9 @@ impl Graphics {
             for x in clip.x..clip.right() {
                 let lx = (x - origin_x) as f32 + plane.ox as f32;
                 let ly = (y - origin_y) as f32 + plane.oy as f32;
-                let sx = wrap_floor(lx / plane.zoom_x, bitmap.width());
-                let sy = wrap_floor(ly / plane.zoom_y, bitmap.height());
+                // Sample the destination pixel center, matching bitmap stretch.
+                let sx = wrap_floor((lx + 0.5) / plane.zoom_x, bitmap.width());
+                let sy = wrap_floor((ly + 0.5) / plane.zoom_y, bitmap.height());
                 let Some(sample) = pixel_of(bitmap, sx, sy) else {
                     continue;
                 };
@@ -906,8 +926,15 @@ impl Graphics {
         clip: Rect,
         origin_x: i32,
         origin_y: i32,
+        controls: bool,
     ) {
         if !window.visible || window.width <= 0 || window.height <= 0 {
+            return;
+        }
+        let window_x = origin_x + window.x;
+        let window_y = origin_y + window.y;
+        if controls {
+            self.draw_window_controls(frame, window, clip, window_x, window_y);
             return;
         }
         let Ok(mut skin_target) = Bitmap::new(window.width, window.height) else {
@@ -963,10 +990,6 @@ impl Graphics {
                 }
             }
         }
-        let window_x = origin_x + window.x;
-        let window_y = origin_y + window.y;
-        let control_clip =
-            clip.intersect(Rect::new(window_x, window_y, window.width, window.height));
         stamp(
             frame,
             &skin_target,
@@ -975,6 +998,18 @@ impl Graphics {
             clip,
             window.opacity,
         );
+    }
+
+    fn draw_window_controls(
+        &self,
+        frame: &mut Bitmap,
+        window: &Window,
+        clip: Rect,
+        window_x: i32,
+        window_y: i32,
+    ) {
+        let control_clip =
+            clip.intersect(Rect::new(window_x, window_y, window.width, window.height));
         if let Some(handle) = window.windowskin {
             if let Ok(skin) = self.bitmap(handle) {
                 if window.cursor_rect.width > 0 && window.cursor_rect.height > 0 {
@@ -1592,6 +1627,14 @@ fn apply_viewport_fx(
                     rgb[i] += tone[i];
                 }
             }
+            // The framebuffer is 8-bit between the tone pass and the color/flash
+            // overlay. Sprite tone stays in one shader and does not take this path.
+            let quantized = quantize_rgb(rgb);
+            rgb = [
+                quantized[0] as f32 / 255.0,
+                quantized[1] as f32 / 255.0,
+                quantized[2] as f32 / 255.0,
+            ];
             if color[3] > 0.0 {
                 for i in 0..3 {
                     rgb[i] = rgb[i] * (1.0 - color[3]) + color[i] * color[3];
@@ -2019,5 +2062,105 @@ mod tests {
         assert_eq!(g.frame().get_pixel(4, 0).red, 0.0, "pause");
         assert_eq!(g.frame().get_pixel(20, 20).red, 0.0, "cursor");
         assert!(g.frame().get_pixel(8, 8).red > 200.0, "inside");
+    }
+
+    #[test]
+    fn window_contents_draw_above_z_plus_one() {
+        let mut g = Graphics::new(17, 17, 1).unwrap();
+        let contents = g.create_bitmap(1, 1).unwrap();
+        g.bitmap_mut(contents)
+            .unwrap()
+            .fill_rect(Rect::new(0, 0, 1, 1), Color::rgb(255.0, 255.0, 255.0));
+        let window = g.create_window(None);
+        {
+            let window = g.window_mut(window).unwrap();
+            window.x = 0;
+            window.y = 0;
+            window.width = 33;
+            window.height = 33;
+            window.z = 100;
+            window.contents = Some(contents);
+        }
+        let red = g.create_bitmap(1, 1).unwrap();
+        g.bitmap_mut(red)
+            .unwrap()
+            .fill_rect(Rect::new(0, 0, 1, 1), Color::rgb(255.0, 0.0, 0.0));
+        let sprite = g.create_sprite(None);
+        g.set_sprite_bitmap(sprite, Some(red)).unwrap();
+        {
+            let sprite = g.sprite_mut(sprite).unwrap();
+            sprite.x = 16;
+            sprite.y = 16;
+            sprite.z = 101;
+        }
+        g.update().unwrap();
+        let px = g.frame().get_pixel(16, 16);
+        assert_eq!(px.red, 255.0);
+        assert_eq!(px.green, 255.0);
+        assert_eq!(px.blue, 255.0);
+    }
+
+    #[test]
+    fn viewport_tone_is_clamped_before_color() {
+        let mut g = Graphics::new(1, 1, 1).unwrap();
+        let view = g.create_viewport(Rect::new(0, 0, 1, 1));
+        {
+            let view = g.viewport_mut(view).unwrap();
+            view.tone = Tone::new(255.0, 0.0, 0.0, 0.0);
+            view.color = Color::new(0.0, 0.0, 0.0, 128.0);
+        }
+        let red = g.create_bitmap(1, 1).unwrap();
+        g.bitmap_mut(red)
+            .unwrap()
+            .fill_rect(Rect::new(0, 0, 1, 1), Color::rgb(255.0, 0.0, 0.0));
+        let sprite = g.create_sprite(Some(view));
+        g.set_sprite_bitmap(sprite, Some(red)).unwrap();
+        g.update().unwrap();
+        let px = g.frame().get_pixel(0, 0);
+        assert_eq!(px.red, 127.0, "tone must saturate before the color overlay");
+    }
+
+    #[test]
+    fn plane_zoom_samples_destination_pixel_centers() {
+        let mut g = Graphics::new(2, 1, 1).unwrap();
+        let bitmap = g.create_bitmap(4, 1).unwrap();
+        {
+            let bitmap = g.bitmap_mut(bitmap).unwrap();
+            bitmap.set_pixel(0, 0, Color::rgb(10.0, 0.0, 0.0));
+            bitmap.set_pixel(1, 0, Color::rgb(50.0, 0.0, 0.0));
+            bitmap.set_pixel(2, 0, Color::rgb(100.0, 0.0, 0.0));
+            bitmap.set_pixel(3, 0, Color::rgb(200.0, 0.0, 0.0));
+        }
+        let plane = g.create_plane(None);
+        {
+            let plane = g.plane_mut(plane).unwrap();
+            plane.bitmap = Some(bitmap);
+            plane.zoom_x = 0.5;
+            plane.zoom_y = 1.0;
+        }
+        g.update().unwrap();
+        assert_eq!(g.frame().get_pixel(0, 0).red, 50.0);
+        assert_eq!(g.frame().get_pixel(1, 0).red, 200.0);
+    }
+
+    #[test]
+    fn bush_depth_uses_display_pixels() {
+        let mut g = Graphics::new(2, 4, 1).unwrap();
+        let bitmap = g.create_bitmap(1, 2).unwrap();
+        g.bitmap_mut(bitmap)
+            .unwrap()
+            .fill_rect(Rect::new(0, 0, 1, 2), Color::rgb(255.0, 255.0, 255.0));
+        let sprite = g.create_sprite(None);
+        g.set_sprite_bitmap(sprite, Some(bitmap)).unwrap();
+        {
+            let sprite = g.sprite_mut(sprite).unwrap();
+            sprite.zoom_x = 2.0;
+            sprite.zoom_y = 2.0;
+            sprite.bush_depth = 1;
+            sprite.bush_opacity = 0;
+        }
+        g.update().unwrap();
+        assert_eq!(g.frame().get_pixel(0, 2).red, 255.0);
+        assert_eq!(g.frame().get_pixel(0, 3).red, 0.0);
     }
 }

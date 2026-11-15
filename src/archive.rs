@@ -7,6 +7,8 @@ use crate::error::{Error, Result};
 
 const HEADER: &[u8; 6] = b"RGSSAD";
 const V1_MAGIC: u32 = 0xDEAD_CAFE;
+/// Shared by the reader and the packer. Longer names cannot be opened.
+const MAX_ARCHIVE_NAME_LEN: usize = 1024;
 
 /// One file stored in an RGSS archive.
 #[derive(Clone, Debug)]
@@ -14,6 +16,9 @@ struct Entry {
     offset: u64,
     size: u64,
     start_magic: u32,
+    /// Filename bytes before display decoding. Two different sequences that
+    /// decode to one string must not overwrite each other.
+    raw_name: Vec<u8>,
 }
 
 /// RGSSAD version 1 (`Game.rgssad`) or version 3 (`Game.rgss3a`).
@@ -147,7 +152,7 @@ impl Archive {
         while cursor + 4 <= bytes.len() {
             let name_len = read_u32(&bytes[cursor..]) ^ advance(&mut magic);
             cursor += 4;
-            if name_len > 1024 {
+            if name_len > MAX_ARCHIVE_NAME_LEN as u32 {
                 return Err(Error::new("RGSS archive name is unreasonably long"));
             }
             if cursor + name_len as usize + 4 > bytes.len() {
@@ -161,14 +166,20 @@ impl Archive {
             }
             let size = read_u32(&bytes[cursor..]) ^ advance(&mut magic);
             cursor += 4;
-            let name = decode_archive_name(&name);
-            let name = normalize_name(&name);
-            let entry = Entry {
-                offset: cursor as u64,
-                size: size as u64,
-                start_magic: magic,
-            };
-            insert_entry(&mut entries, &mut dirs, name, entry);
+            let raw_name = name;
+            let name = normalize_name(&decode_archive_name(&raw_name));
+            insert_entry(
+                &mut entries,
+                &mut dirs,
+                &raw_name,
+                name,
+                Entry {
+                    offset: cursor as u64,
+                    size: size as u64,
+                    start_magic: magic,
+                    raw_name: Vec::new(),
+                },
+            )?;
             cursor = cursor
                 .checked_add(size as usize)
                 .ok_or_else(|| Error::new("RGSS archive entry size overflows"))?;
@@ -215,7 +226,7 @@ impl Archive {
             cursor += 4;
             let name_len = read_u32(&bytes[cursor..]) ^ base_magic;
             cursor += 4;
-            if name_len > 1024 || cursor + name_len as usize > bytes.len() {
+            if name_len > MAX_ARCHIVE_NAME_LEN as u32 || cursor + name_len as usize > bytes.len() {
                 return Err(Error::new("truncated RGSS3 archive name"));
             }
             let mut name = bytes[cursor..cursor + name_len as usize].to_vec();
@@ -223,17 +234,20 @@ impl Archive {
             for (i, byte) in name.iter_mut().enumerate() {
                 *byte ^= ((base_magic >> (8 * (i % 4))) & 0xFF) as u8;
             }
-            let name = normalize_name(&decode_archive_name(&name));
+            let raw_name = name;
+            let name = normalize_name(&decode_archive_name(&raw_name));
             insert_entry(
                 &mut entries,
                 &mut dirs,
+                &raw_name,
                 name,
                 Entry {
                     offset: offset as u64,
                     size: size as u64,
                     start_magic: magic,
+                    raw_name: Vec::new(),
                 },
-            );
+            )?;
         }
 
         Ok(Self {
@@ -275,11 +289,29 @@ impl Archive {
 fn insert_entry(
     entries: &mut BTreeMap<String, Entry>,
     dirs: &mut BTreeMap<String, Vec<String>>,
-    name: String,
-    entry: Entry,
-) {
+    raw_name: &[u8],
+    mut name: String,
+    mut entry: Entry,
+) -> Result<()> {
     if name.is_empty() {
-        return;
+        return Ok(());
+    }
+    // A Latin-1 byte and its UTF-8 encoding both display as the same string.
+    // Keep the first display key, and store the other bytes under a reversible
+    // identity. Never replace one payload with the other.
+    if entries
+        .get(&name)
+        .is_some_and(|previous| previous.raw_name.as_slice() != raw_name)
+    {
+        name = disambiguated_archive_name(raw_name);
+    }
+    if entries
+        .get(&name)
+        .is_some_and(|previous| previous.raw_name.as_slice() != raw_name)
+    {
+        return Err(Error::new(format!(
+            "RGSS archive entry name collides: {name}"
+        )));
     }
     if let Some((dir, file)) = name.rsplit_once('/') {
         push_unique(dirs.entry(dir.to_string()).or_default(), file.to_string());
@@ -294,7 +326,22 @@ fn insert_entry(
     } else {
         push_unique(dirs.entry(String::new()).or_default(), name.clone());
     }
+    entry.raw_name = raw_name.to_vec();
     entries.insert(name, entry);
+    Ok(())
+}
+
+/// Reversible key for filename bytes whose display form is already taken.
+/// `U+FFFE` cannot appear in a successful UTF-8 decode of a different sequence
+/// that we then normalize into this same hex spelling without itself being
+/// stored under that display key first; a remaining clash is an error.
+fn disambiguated_archive_name(bytes: &[u8]) -> String {
+    let mut name = String::from("\u{FFFE}");
+    for byte in bytes {
+        name.push(char::from_digit(u32::from(*byte >> 4), 16).unwrap_or('0'));
+        name.push(char::from_digit(u32::from(*byte & 0x0f), 16).unwrap_or('0'));
+    }
+    name
 }
 
 fn push_unique(list: &mut Vec<String>, value: String) {
@@ -409,7 +456,7 @@ fn decrypt(data: &[u8], start_magic: u32, offset: u64) -> Vec<u8> {
         let shift = (pos % 4) * 8;
         *byte ^= ((magic >> shift) & 0xFF) as u8;
         pos += 1;
-        if pos % 4 == 0 {
+        if pos.is_multiple_of(4) {
             advance(&mut magic);
         }
     }
@@ -420,6 +467,14 @@ fn encrypt_body(data: &[u8], magic: u32) -> Vec<u8> {
     decrypt(data, magic, 0)
 }
 
+fn checked_archive_name(name: &str) -> Result<String> {
+    let name = normalize_name(name);
+    if name.len() > MAX_ARCHIVE_NAME_LEN {
+        return Err(Error::new("RGSS archive name is unreasonably long"));
+    }
+    Ok(name)
+}
+
 fn pack_v1(version: u8, files: &[(&str, &[u8])]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     out.extend_from_slice(HEADER);
@@ -427,7 +482,7 @@ fn pack_v1(version: u8, files: &[(&str, &[u8])]) -> Result<Vec<u8>> {
     out.push(version);
     let mut magic = V1_MAGIC;
     for (name, data) in files {
-        let name = normalize_name(name);
+        let name = checked_archive_name(name)?;
         let name_bytes = name.as_bytes();
         let enc_len = as_u32(name_bytes.len(), "archive name")? ^ advance(&mut magic);
         out.extend_from_slice(&enc_len.to_le_bytes());
@@ -456,14 +511,14 @@ fn pack_v3(files: &[(&str, &[u8])]) -> Result<Vec<u8>> {
     // 8 byte header + 4 byte key + one 16-byte record per file + names + 4 byte terminator.
     let mut dir_len = 16usize;
     for (name, _) in files {
-        let name_len = as_u32(normalize_name(name).len(), "archive name")? as usize;
+        let name_len = as_u32(checked_archive_name(name)?.len(), "archive name")? as usize;
         dir_len = dir_len
             .checked_add(16)
             .and_then(|sum| sum.checked_add(name_len))
             .ok_or_else(|| Error::new("archive directory is too large"))?;
     }
     for (index, (name, data)) in files.iter().enumerate() {
-        let name = normalize_name(name);
+        let name = checked_archive_name(name)?;
         let offset = checked_sum(dir_len, cursor)?;
         let file_magic = 0x1000_0000u32.wrapping_add(as_u32(index, "archive file count")?);
         let size = as_u32(data.len(), "archive file")?;
@@ -593,7 +648,27 @@ fn install_extracted(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 #[cfg(test)]
+fn pack_v1_raw(files: &[(&[u8], &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(HEADER);
+    out.push(0);
+    out.push(1);
+    let mut magic = V1_MAGIC;
+    for (name, data) in files {
+        let enc_len = (name.len() as u32) ^ advance(&mut magic);
+        out.extend_from_slice(&enc_len.to_le_bytes());
+        for &byte in *name {
+            out.push(byte ^ (advance(&mut magic) as u8));
+        }
+        let enc_size = (data.len() as u32) ^ advance(&mut magic);
+        out.extend_from_slice(&enc_size.to_le_bytes());
+        out.extend_from_slice(&encrypt_body(data, magic));
+    }
+    out
+}
+
 mod tests {
+    #[cfg(test)]
     use super::*;
 
     #[test]
@@ -702,20 +777,9 @@ mod tests {
     }
 
     #[test]
-    fn extract_refuses_to_follow_a_destination_symlink() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn extract_writes_entries_on_every_platform() {
         let dir = std::env::temp_dir().join(format!("mkxpz-extract-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let dest = dir.join("out");
-        let outside = dir.join("outside");
-        std::fs::create_dir_all(&dest).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, dest.join("Data")).unwrap();
-        let packed = Archive::pack(1, &[("Data/settings.ini", b"secret")]).unwrap();
-        let archive = Archive::open(packed).unwrap();
-        assert!(archive.extract_to(&dest).is_err());
-        assert!(!outside.join("settings.ini").exists());
 
         let ok = dir.join("plain");
         let packed = Archive::pack(1, &[("Data/settings.ini", b"secret")]).unwrap();
@@ -746,6 +810,25 @@ mod tests {
             .extract_to(&long_root)
             .unwrap();
         assert_eq!(std::fs::read(long_root.join(&long_name)).unwrap(), b"ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_refuses_to_follow_a_destination_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("mkxpz-extract-unix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dest = dir.join("out");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, dest.join("Data")).unwrap();
+        let packed = Archive::pack(1, &[("Data/settings.ini", b"secret")]).unwrap();
+        let archive = Archive::open(packed).unwrap();
+        assert!(archive.extract_to(&dest).is_err());
+        assert!(!outside.join("settings.ini").exists());
 
         let private_root = dir.join("private");
         std::fs::create_dir_all(&private_root).unwrap();
@@ -767,5 +850,39 @@ mod tests {
             & 0o777;
         assert_eq!(mode, 0o600);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decoded_names_with_different_bytes_are_both_kept() {
+        let packed = pack_v1_raw(&[
+            (b"\xe9.dat".as_slice(), b"latin"),
+            (b"\xc3\xa9.dat".as_slice(), b"utf8"),
+        ]);
+        let archive = Archive::open(packed).unwrap();
+        let mut payloads: Vec<Vec<u8>> = archive
+            .files()
+            .map(|name| archive.read(name).unwrap())
+            .collect();
+        payloads.sort();
+        assert_eq!(payloads, vec![b"latin".to_vec(), b"utf8".to_vec()]);
+        assert_eq!(archive.read("é.dat").unwrap(), b"latin");
+        let other = archive.files().find(|name| *name != "é.dat").unwrap();
+        assert_eq!(archive.read(other).unwrap(), b"utf8");
+    }
+
+    #[test]
+    fn pack_rejects_names_the_reader_cannot_open() {
+        let name = format!("{}x", "a/".repeat(512));
+        assert_eq!(name.len(), 1025);
+        for version in [1, 2, 3] {
+            let err = Archive::pack(version, &[(&name, b"data")]).unwrap_err();
+            assert!(
+                err.to_string().contains("unreasonably long"),
+                "version {version}: {err}"
+            );
+        }
+        let limit = "a".repeat(MAX_ARCHIVE_NAME_LEN);
+        let packed = Archive::pack(1, &[(&limit, b"ok")]).unwrap();
+        assert_eq!(Archive::open(packed).unwrap().read(&limit).unwrap(), b"ok");
     }
 }
