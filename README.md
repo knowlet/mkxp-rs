@@ -22,6 +22,12 @@ It supports Windows, Linux (x86, ARM, and POWER), and both Intel and Apple Silic
 
 mkxp-z is licensed under the GNU General Public License v2+. However, if you build mkxp-z with the `openssl` option turned on (which is the default), you will also need to comply with OpenSSL's Apache v2 license, which in practice means that the resulting binaries are licensed under GPLv3.
 
+## Rust runtime (`mkxpz`)
+
+This repository also contains `mkxpz`, a std-only crate for the deterministic RGSS runtime core. Its minimum supported Rust version (MSRV) is **1.88**.
+
+That floor is deliberate. The crate calls standard-library APIs that stabilized in Rust 1.88, `slice::as_chunks` and `slice::as_chunks_mut`, and unsigned `is_multiple_of`, which stabilized in 1.87. `Cargo.toml` sets `rust-version = "1.88"`, so an older toolchain is rejected by Cargo instead of failing later inside those calls.
+
 ## Bindings
 Bindings provide the glue code for an interpreted language environment to run game scripts in. mkxp-z focuses on MRI and as such the mruby and null bindings are not included.
 
