@@ -507,7 +507,7 @@ impl Parser<'_> {
             Some(b't') => self.parse_ident("true", Json::Bool(true)),
             Some(b'f') => self.parse_ident("false", Json::Bool(false)),
             Some(b'n') => self.parse_ident("null", Json::Null),
-            Some(b'-') | Some(b'0'..=b'9') => self.parse_number(),
+            Some(b'+' | b'-' | b'.' | b'0'..=b'9') => self.parse_number(),
             Some(other) => Err(Error::new(format!(
                 "unexpected '{}' in mkxp.json",
                 other as char
@@ -714,7 +714,7 @@ impl Parser<'_> {
     }
     fn parse_number(&mut self) -> Result<Json> {
         let start = self.index;
-        if self.peek() == Some(b'-') {
+        if matches!(self.peek(), Some(b'+' | b'-')) {
             self.index += 1;
         }
         if self.peek() == Some(b'0') && matches!(self.bytes.get(self.index + 1), Some(b'x' | b'X'))
@@ -778,6 +778,49 @@ fn parse_ini(text: &str) -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json5_accepts_signed_and_leading_decimal_numbers() {
+        for (literal, expected) in [
+            (".5", 0.5),
+            ("+.5", 0.5),
+            ("-.5", -0.5),
+            ("+0.5", 0.5),
+            ("-0.5", -0.5),
+            ("+1", 1.0),
+            ("1.", 1.0),
+            ("+1.", 1.0),
+            (".5e+2", 50.0),
+            ("+.5E-1", 0.05),
+        ] {
+            let config = Config::from_json5(&format!("{{fontScale: {literal}}}"))
+                .unwrap_or_else(|err| panic!("{literal}: {err}"));
+            assert_eq!(config.font_scale, expected, "{literal}");
+        }
+    }
+
+    #[test]
+    fn json5_accepts_signed_hex_numbers() {
+        for (literal, expected) in [("0x280", 640.0), ("+0X280", 640.0), ("-0x280", -640.0)] {
+            let config = Config::from_json5(&format!("{{fontScale: {literal}}}"))
+                .unwrap_or_else(|err| panic!("{literal}: {err}"));
+            assert_eq!(config.font_scale, expected, "{literal}");
+        }
+        let config = Config::from_json5("{defScreenW: +0x280}").unwrap();
+        assert_eq!(config.def_screen_w, 640);
+    }
+
+    #[test]
+    fn json5_rejects_incomplete_signed_numbers() {
+        for literal in [
+            "+", "-", ".", "+.", "-.", "+0x", "-0X", "+1e", "+1e-", "++1", "+-1",
+        ] {
+            assert!(
+                Config::from_json5(&format!("{{fontScale: {literal}}}")).is_err(),
+                "{literal}"
+            );
+        }
+    }
 
     #[test]
     fn json5_surrogate_pairs_match_literal_unicode() {
