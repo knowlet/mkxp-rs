@@ -351,9 +351,11 @@ fn advance(magic: &mut u32) -> u32 {
     old
 }
 
-/// Jump `steps` dwords ahead in the RGSS LCG. `steps` fits in `u32` because an
-/// RGSS payload cannot contain more than 2^30 dwords.
+/// Jump `steps` dwords ahead in the RGSS LCG.
 fn advance_n(magic: &mut u32, mut steps: u32) {
+    // The LCG repeats every 2^30 steps. Keep the jump-table index in range,
+    // including for a caller that supplies a complete period or more (#381).
+    steps &= 0x3fff_ffff;
     const LCG: [[u32; 2]; 30] = [
         [0x0000_0007, 0x0000_0003],
         [0x0000_0031, 0x0000_0018],
@@ -667,6 +669,28 @@ mod tests {
         }
         advance_n(&mut jumped, 1000);
         assert_eq!(stepped, jumped);
+    }
+
+    #[test]
+    fn advance_n_handles_large_seek_counts() {
+        // Upstream #381 overflowed a 30-entry jump table at large seeks.
+        // Independent exponentiation of x -> 7*x + 3 modulo 2^32.
+        for count in [1 << 28, 1 << 30, 1 << 31, u32::MAX] {
+            let mut remaining = count;
+            let (mut mul, mut add) = (7u32, 3u32);
+            let mut expected = 0x1234_5678u32;
+            while remaining != 0 {
+                if remaining & 1 != 0 {
+                    expected = expected.wrapping_mul(mul).wrapping_add(add);
+                }
+                add = add.wrapping_mul(mul.wrapping_add(1));
+                mul = mul.wrapping_mul(mul);
+                remaining >>= 1;
+            }
+            let mut actual = 0x1234_5678;
+            advance_n(&mut actual, count);
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

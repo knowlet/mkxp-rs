@@ -637,7 +637,26 @@ impl Parser<'_> {
                             .map_err(|_| Error::new("bad unicode escape"))?;
                         let code = u32::from_str_radix(text, 16)
                             .map_err(|_| Error::new("bad unicode escape"))?;
-                        out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
+                        // JSON represents non-BMP characters as two UTF-16
+                        // escapes. Decode the pair before converting to a Rust
+                        // scalar; lone surrogates keep replacement semantics.
+                        let low = self
+                            .bytes
+                            .get(self.index..self.index + 6)
+                            .filter(|tail| tail.starts_with(b"\\u"))
+                            .and_then(|tail| std::str::from_utf8(&tail[2..]).ok())
+                            .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+                        let scalar = if (0xD800..=0xDBFF).contains(&code) {
+                            if let Some(low) = low.filter(|low| (0xDC00..=0xDFFF).contains(low)) {
+                                self.index += 6;
+                                0x10000 + ((code - 0xD800) << 10) + low - 0xDC00
+                            } else {
+                                code
+                            }
+                        } else {
+                            code
+                        };
+                        out.push(char::from_u32(scalar).unwrap_or('\u{FFFD}'));
                     }
                     _ => return Err(Error::new("unknown string escape")),
                 }
@@ -731,6 +750,35 @@ fn parse_ini(text: &str) -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json5_surrogate_pairs_match_literal_unicode() {
+        let escaped =
+            Config::from_json5(r#"{windowTitle: "\uD83D\uDE00", RTP: ["\uD840\uDC00"]}"#).unwrap();
+        let literal = Config::from_json5(r#"{windowTitle: "😀", RTP: ["𠀀"]}"#).unwrap();
+        assert_eq!(escaped.window_title, literal.window_title);
+        assert_eq!(escaped.rtps, literal.rtps);
+    }
+
+    #[test]
+    fn json5_surrogate_boundaries_and_invalid_escapes() {
+        for (escaped, expected) in [
+            (r"\uD800\uDC00", "\u{10000}"),
+            (r"\uDBFF\uDFFF", "\u{10FFFF}"),
+            (r"\uD83D\uDE00\uD83D\uDE00", "😀😀"),
+            (r"\u00E9\u52C7", "é勇"),
+            (r"\uD800", "�"),
+            (r"\uDC00", "�"),
+            (r"\uD800\u0041", "�A"),
+            (r"\uD800x", "�x"),
+        ] {
+            let config = Config::from_json5(&format!("{{windowTitle: '{escaped}'}}")).unwrap();
+            assert_eq!(config.window_title, expected, "{escaped}");
+        }
+        for escaped in [r"\uD800\uZZZZ", r"\uD800\uDC", r"\uZZZZ"] {
+            assert!(Config::from_json5(&format!("{{windowTitle: '{escaped}'}}")).is_err());
+        }
+    }
 
     #[test]
     fn json5_comments_and_trailing_commas() {
