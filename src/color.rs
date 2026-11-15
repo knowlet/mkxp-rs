@@ -75,10 +75,10 @@ impl Color {
 
     pub fn norm(self) -> [f32; 4] {
         [
-            (self.red / 255.0) as f32,
-            (self.green / 255.0) as f32,
-            (self.blue / 255.0) as f32,
-            (self.alpha / 255.0) as f32,
+            (self.red.clamp(0.0, 255.0) / 255.0) as f32,
+            (self.green.clamp(0.0, 255.0) / 255.0) as f32,
+            (self.blue.clamp(0.0, 255.0) / 255.0) as f32,
+            (self.alpha.clamp(0.0, 255.0) / 255.0) as f32,
         ]
     }
 
@@ -203,6 +203,17 @@ mod tests {
         assert_eq!(color, back);
         assert_eq!(Color::channel_u8(300.0), 255);
         assert_eq!(Color::channel_u8(10.9), 10);
+    }
+
+    #[test]
+    fn color_norm_clamps_shader_channels() {
+        let color = Color::new(-20.0, 300.0, 127.5, 510.0);
+        let norm = color.norm();
+        assert_eq!(norm[0], 0.0);
+        assert_eq!(norm[1], 1.0);
+        assert!((norm[2] - 0.5).abs() < 0.001, "{norm:?}");
+        assert_eq!(norm[3], 1.0);
+        assert_eq!(color.red, -20.0);
     }
 
     #[test]

@@ -179,15 +179,25 @@ impl Bitmap {
         smooth: bool,
         subtract: bool,
     ) {
-        let flip_x = dest.width < 0;
-        let flip_y = dest.height < 0;
+        // A negative source rect and a negative destination rect each mirror.
+        // Both together cancel, matching a reversed glBlitFramebuffer.
+        let flip_x = (dest.width < 0) ^ (source_rect.width < 0);
+        let flip_y = (dest.height < 0) ^ (source_rect.height < 0);
         let dest_w = dest.width.abs();
         let dest_h = dest.height.abs();
         if dest_w == 0 || dest_h == 0 {
             return;
         }
-        let origin_x = if flip_x { dest.x + dest.width } else { dest.x };
-        let origin_y = if flip_y { dest.y + dest.height } else { dest.y };
+        let origin_x = if dest.width < 0 {
+            dest.x + dest.width
+        } else {
+            dest.x
+        };
+        let origin_y = if dest.height < 0 {
+            dest.y + dest.height
+        } else {
+            dest.y
+        };
         for dy in 0..dest_h {
             for dx in 0..dest_w {
                 let src_px = if smooth {
@@ -506,10 +516,15 @@ fn sample_nearest(origin: i32, length: i32, dest_index: i32, dest_len: i32, flip
     if dest_len == 0 || length == 0 {
         return origin;
     }
-    let src_len = length.abs();
-    let mut index = (dest_index as i64 * src_len as i64) / dest_len as i64;
+    let src_len = length.abs() as i64;
+    let dest_len = dest_len as i64;
+    // GL_NEAREST samples the source at the destination pixel center.
+    let mut index = ((dest_index as i64 * 2 + 1) * src_len) / (dest_len * 2);
+    if index >= src_len {
+        index = src_len - 1;
+    }
     if flip {
-        index = src_len as i64 - 1 - index;
+        index = src_len - 1 - index;
     }
     let base = if length >= 0 { origin } else { origin + length };
     base + index as i32
@@ -535,8 +550,10 @@ fn sample_bilinear(source: &Bitmap, source_rect: &Rect, at: BilinearAt) -> [u8; 
     } = at;
     let w_ratio = source_rect.width.abs() as f32 / dest_w as f32;
     let h_ratio = source_rect.height.abs() as f32 / dest_h as f32;
-    let mut fx = w_ratio * dx as f32;
-    let mut fy = h_ratio * dy as f32;
+    // Half a destination pixel, then back by half a source texel, so a 1:1
+    // blit lands on texel centers instead of their top-left corners.
+    let mut fx = w_ratio * (dx as f32 + 0.5) - 0.5;
+    let mut fy = h_ratio * (dy as f32 + 0.5) - 0.5;
     if flip_x {
         fx = source_rect.width.abs() as f32 - 1.0 - fx;
     }
@@ -695,6 +712,41 @@ fn shrink_rects_f(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stretch_nearest_samples_destination_pixel_centers() {
+        let mut src = Bitmap::new(4, 1).unwrap();
+        for (x, red) in [10u8, 50, 100, 200].into_iter().enumerate() {
+            src.set_pixel(x as i32, 0, Color::new(red as f64, 0.0, 0.0, 255.0));
+        }
+        let mut dest = Bitmap::new(2, 1).unwrap();
+        dest.stretch_blt(dest.rect(), &src, src.rect(), 255, false);
+        assert_eq!(dest.get_pixel(0, 0).red, 50.0);
+        assert_eq!(dest.get_pixel(1, 0).red, 200.0);
+
+        let mut same = Bitmap::new(4, 1).unwrap();
+        same.stretch_blt(same.rect(), &src, src.rect(), 255, false);
+        for x in 0..4 {
+            assert_eq!(same.get_pixel(x, 0).red, src.get_pixel(x, 0).red);
+        }
+    }
+
+    #[test]
+    fn negative_source_width_mirrors_a_positive_destination() {
+        let mut src = Bitmap::new(4, 1).unwrap();
+        src.set_pixel(1, 0, Color::new(10.0, 0.0, 0.0, 255.0));
+        src.set_pixel(2, 0, Color::new(200.0, 0.0, 0.0, 255.0));
+        let mut dest = Bitmap::new(2, 1).unwrap();
+        dest.stretch_blt(
+            Rect::new(0, 0, 2, 1),
+            &src,
+            Rect::new(3, 0, -2, 1),
+            255,
+            false,
+        );
+        assert_eq!(dest.get_pixel(0, 0).red, 200.0);
+        assert_eq!(dest.get_pixel(1, 0).red, 10.0);
+    }
 
     #[test]
     fn blit_clips_to_the_destination_and_respects_opacity() {

@@ -627,6 +627,34 @@ impl Parser<'_> {
                         out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
                     }
                     b'u' => {
+                        if self.peek() == Some(b'{') {
+                            self.bump();
+                            let mut hex = Vec::new();
+                            loop {
+                                let digit = self
+                                    .bump()
+                                    .ok_or_else(|| Error::new("truncated unicode escape"))?;
+                                if digit == b'}' {
+                                    break;
+                                }
+                                if !digit.is_ascii_hexdigit() || hex.len() == 6 {
+                                    return Err(Error::new("bad unicode escape"));
+                                }
+                                hex.push(digit);
+                            }
+                            if hex.is_empty() {
+                                return Err(Error::new("bad unicode escape"));
+                            }
+                            let text = std::str::from_utf8(&hex)
+                                .map_err(|_| Error::new("bad unicode escape"))?;
+                            let code = u32::from_str_radix(text, 16)
+                                .map_err(|_| Error::new("bad unicode escape"))?;
+                            out.push(
+                                char::from_u32(code)
+                                    .ok_or_else(|| Error::new("bad unicode escape"))?,
+                            );
+                            continue;
+                        }
                         let mut hex = [0u8; 4];
                         for slot in &mut hex {
                             *slot = self
@@ -775,6 +803,10 @@ mod tests {
             let config = Config::from_json5(&format!("{{windowTitle: '{escaped}'}}")).unwrap();
             assert_eq!(config.window_title, expected, "{escaped}");
         }
+        let braced = Config::from_json5(r#"{windowTitle: "\u{1F600}"}"#).unwrap();
+        assert_eq!(braced.window_title, "😀");
+        assert!(Config::from_json5(r#"{windowTitle: "\u{}"}"#).is_err());
+        assert!(Config::from_json5(r#"{windowTitle: "\q"}"#).is_err());
         for escaped in [r"\uD800\uZZZZ", r"\uD800\uDC", r"\uZZZZ"] {
             assert!(Config::from_json5(&format!("{{windowTitle: '{escaped}'}}")).is_err());
         }

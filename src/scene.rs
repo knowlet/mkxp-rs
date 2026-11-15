@@ -564,8 +564,11 @@ impl Graphics {
             return Ok(());
         }
         if out {
+            // The copied `diff + curr * i / duration` formula ends at
+            // `255 - curr`. Fadeout has to approach black from the current
+            // brightness, and it matches the old formula when that starts at 255.
             for i in (0..duration).rev() {
-                let value = diff + (curr / duration as f32) * i as f32;
+                let value = (curr / duration as f32) * i as f32;
                 self.brightness = (value as i32).clamp(0, 255);
                 self.present_fade()?;
             }
@@ -1859,6 +1862,22 @@ mod tests {
         assert!(mid > 0.0 && mid < 255.0, "{mid}");
         g.update().unwrap();
         assert_eq!(g.frame().get_pixel(0, 0).red, 255.0);
+    }
+
+    #[test]
+    fn fadeout_approaches_black_from_the_current_brightness() {
+        let mut g = Graphics::new(1, 1, 1).unwrap();
+        g.brightness = 0;
+        g.fadeout(2).unwrap();
+        assert_eq!(g.brightness, 0);
+
+        g.brightness = 128;
+        g.fadeout(2).unwrap();
+        assert_eq!(g.brightness, 0);
+
+        g.brightness = 255;
+        g.fadeout(2).unwrap();
+        assert_eq!(g.brightness, 0);
     }
 
     #[test]
