@@ -840,13 +840,10 @@ impl Graphics {
                     rgb = [1.0 - rgb[0], 1.0 - rgb[1], 1.0 - rgb[2]];
                 }
                 let mut alpha = sample[3] as f32 * (sprite.opacity.clamp(0, 255) as f32 / 255.0);
-                // `bush_depth` is a display-pixel distance from the transformed
-                // bottom edge, so zoom (and the inverse local Y) scale it.
-                if sprite.bush_depth > 0 && sprite.zoom_y != 0.0 {
-                    let boundary = src_h - sprite.bush_depth as f32 / sprite.zoom_y;
-                    if ly >= boundary {
-                        alpha *= sprite.bush_opacity.clamp(0, 255) as f32 / 255.0;
-                    }
+                // `bush_depth` is a screen-pixel band above the lowest point of
+                // the transformed quad, so rotation and zoom move that edge.
+                if sprite.bush_depth > 0 && (y as f32 + 0.5) >= max_y - sprite.bush_depth as f32 {
+                    alpha *= sprite.bush_opacity.clamp(0, 255) as f32 / 255.0;
                 }
                 let rgb = quantize_rgb(rgb);
                 let src = [
@@ -2162,5 +2159,30 @@ mod tests {
         g.update().unwrap();
         assert_eq!(g.frame().get_pixel(0, 2).red, 255.0);
         assert_eq!(g.frame().get_pixel(0, 3).red, 0.0);
+    }
+
+    #[test]
+    fn rotated_bush_follows_the_screen_bottom() {
+        let mut g = Graphics::new(4, 6, 1).unwrap();
+        let bitmap = g.create_bitmap(4, 2).unwrap();
+        g.bitmap_mut(bitmap)
+            .unwrap()
+            .fill_rect(Rect::new(0, 0, 4, 2), Color::rgb(255.0, 255.0, 255.0));
+        let sprite = g.create_sprite(None);
+        g.set_sprite_bitmap(sprite, Some(bitmap)).unwrap();
+        {
+            let sprite = g.sprite_mut(sprite).unwrap();
+            sprite.angle = 90.0;
+            sprite.y = 4;
+            sprite.bush_depth = 1;
+            sprite.bush_opacity = 0;
+        }
+        g.update().unwrap();
+        assert_eq!(
+            g.frame().get_pixel(1, 0).red,
+            255.0,
+            "local bottom is not the screen bottom"
+        );
+        assert_eq!(g.frame().get_pixel(0, 3).red, 0.0, "screen-bottom pixel");
     }
 }

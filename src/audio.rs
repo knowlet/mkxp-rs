@@ -109,6 +109,18 @@ struct SeSlot {
     channel: Channel,
 }
 
+/// ME ducking of BGM, matching `meWatch` in `audio.cpp`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MePhase {
+    Idle,
+    /// External volume falls for 200ms while BGM is still advancing.
+    Ducking,
+    /// BGM clock is held and external volume is 0.
+    Held,
+    /// ME has ended. External volume rises for 1000ms while BGM advances.
+    Restoring,
+}
+
 /// RGSS `Audio` module.
 #[derive(Clone, Debug)]
 pub struct Audio {
@@ -119,9 +131,9 @@ pub struct Audio {
     se_limit: usize,
     /// `AudioStream::BaseRatio`. `track == -127` changes this, not each track.
     bgm_ratio: i32,
-    /// ME playback ducks BGM: 200ms of continued playback, then the clock holds.
-    bgm_me_active: bool,
-    bgm_me_fade_left: i32,
+    me_phase: MePhase,
+    /// Milliseconds left in `Ducking` or `Restoring`.
+    me_ms: i32,
 }
 
 impl Audio {
@@ -135,8 +147,8 @@ impl Audio {
             se: Vec::new(),
             se_limit,
             bgm_ratio: 100,
-            bgm_me_active: false,
-            bgm_me_fade_left: 0,
+            me_phase: MePhase::Idle,
+            me_ms: 0,
         }
     }
 
@@ -214,9 +226,15 @@ impl Audio {
 
     pub fn me_play(&mut self, filename: &str, volume: i32, pitch: i32) {
         self.me.play(filename, volume, pitch, 0.0);
+        if self.me.playing {
+            // A new ME starts its own duck. Do not inherit a finished timer.
+            self.me_phase = MePhase::Ducking;
+            self.me_ms = 200;
+        }
     }
     pub fn me_stop(&mut self) {
         self.me.stop();
+        self.finish_me();
     }
     pub fn me_fade(&mut self, time_ms: i32) {
         self.me.fade(time_ms);
@@ -249,8 +267,8 @@ impl Audio {
         self.bgs.stop();
         self.me.stop();
         self.se.clear();
-        self.bgm_me_active = false;
-        self.bgm_me_fade_left = 0;
+        self.me_phase = MePhase::Idle;
+        self.me_ms = 0;
     }
 
     /// Advance playback clocks by `dt_ms`. Called once per presented frame.
@@ -261,35 +279,65 @@ impl Audio {
         }
         self.bgs.advance(dt_ms);
         self.me.advance(dt_ms);
+        if !self.me.playing {
+            self.finish_me();
+        }
         for slot in &mut self.se {
             slot.channel.advance(dt_ms);
         }
     }
 
     /// While an ME is playing, BGM keeps moving for the 200ms duck, then holds.
+    /// After the ME stops, BGM advances immediately and the external volume
+    /// fades back in over one second.
     fn bgm_dt(&mut self, dt_ms: i32) -> i32 {
-        if !self.me.playing {
-            self.bgm_me_active = false;
-            self.bgm_me_fade_left = 0;
-            return dt_ms;
+        if self.me.playing {
+            if !matches!(self.me_phase, MePhase::Ducking | MePhase::Held) {
+                self.me_phase = MePhase::Ducking;
+                self.me_ms = 200;
+            }
+            if self.me_phase == MePhase::Ducking {
+                let audible = self.me_ms.min(dt_ms).max(0);
+                self.me_ms -= audible;
+                if self.me_ms <= 0 {
+                    self.me_phase = MePhase::Held;
+                    self.me_ms = 0;
+                }
+                return audible;
+            }
+            return 0;
         }
-        if !self.bgm_me_active {
-            self.bgm_me_active = true;
-            self.bgm_me_fade_left = 200;
+        match self.me_phase {
+            MePhase::Ducking | MePhase::Held => {
+                self.me_phase = MePhase::Restoring;
+                self.me_ms = 1000;
+            }
+            MePhase::Restoring => {
+                self.me_ms -= dt_ms;
+                if self.me_ms <= 0 {
+                    self.me_phase = MePhase::Idle;
+                    self.me_ms = 0;
+                }
+            }
+            MePhase::Idle => {}
         }
-        let audible = self.bgm_me_fade_left.min(dt_ms).max(0);
-        self.bgm_me_fade_left -= audible;
-        audible
+        dt_ms
+    }
+
+    fn finish_me(&mut self) {
+        if matches!(self.me_phase, MePhase::Ducking | MePhase::Held) {
+            self.me_phase = MePhase::Restoring;
+            self.me_ms = 1000;
+        }
     }
 
     fn me_factor(&self) -> f32 {
-        if !self.bgm_me_active {
-            return 1.0;
+        match self.me_phase {
+            MePhase::Idle => 1.0,
+            MePhase::Ducking => (self.me_ms as f32 / 200.0).clamp(0.0, 1.0),
+            MePhase::Held => 0.0,
+            MePhase::Restoring => 1.0 - (self.me_ms.max(0) as f32 / 1000.0),
         }
-        if self.bgm_me_fade_left <= 0 {
-            return 0.0;
-        }
-        self.bgm_me_fade_left as f32 / 200.0
     }
 
     fn track_slot(&self, track: i32) -> Option<usize> {
@@ -380,6 +428,37 @@ mod tests {
         assert!(
             (resumed - 11.2).abs() < 1e-9,
             "BGM should resume from the held position, got {resumed}"
+        );
+    }
+
+    #[test]
+    fn me_end_fades_bgm_back_in_over_one_second() {
+        let mut audio = Audio::new(1, 1);
+        audio.bgm_play("bgm", 100, 100, 0.0, 0);
+        audio.me_play("me", 100, 100);
+        audio.update(1000);
+        assert_eq!(audio.bgm_level(0), 0);
+        audio.me_stop();
+        audio.update(500);
+        assert_eq!(audio.bgm_level(0), 50);
+        audio.update(500);
+        assert_eq!(audio.bgm_level(0), 100);
+    }
+
+    #[test]
+    fn me_replay_before_the_next_update_starts_a_fresh_duck() {
+        let mut audio = Audio::new(1, 1);
+        audio.bgm_play("bgm", 100, 100, 0.0, 0);
+        audio.me_play("me", 100, 100);
+        audio.update(1000);
+        let held = audio.bgm_pos(0);
+        audio.me_stop();
+        audio.me_play("me", 100, 100);
+        audio.update(1000);
+        let again = audio.bgm_pos(0);
+        assert!(
+            (again - held - 0.2).abs() < 1e-9,
+            "a new ME should duck for another 200ms, got {held} -> {again}"
         );
     }
 

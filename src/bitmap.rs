@@ -424,6 +424,7 @@ impl Bitmap {
         for (index, ch) in text.chars().enumerate() {
             let glyph_x = x + (index as f32 * step).round() as i32;
             let rows = glyph_rows(ch);
+            let mut painted = Vec::new();
             for (row, bits) in rows.iter().enumerate() {
                 for col in 0..GLYPH_WIDTH {
                     if bits & (1 << (GLYPH_WIDTH - 1 - col)) == 0 {
@@ -434,9 +435,10 @@ impl Bitmap {
                             let src_x = col * scale + sx;
                             let px = glyph_x + (src_x as f32 * squeeze).floor() as i32;
                             let py = y + row as i32 * scale + sy;
-                            if !clip.contains(px, py) {
+                            if !clip.contains(px, py) || painted.contains(&(px, py)) {
                                 continue;
                             }
+                            painted.push((px, py));
                             if let Some(dst) = self.get(px, py) {
                                 self.put(px, py, bitmap_blend(dst, ink, 255));
                             }
@@ -806,5 +808,16 @@ mod tests {
         // used to be clipped away (alpha 0) because only the advance shrank.
         assert_eq!(bmp.get_pixel(2, 0).alpha, 255.0);
         assert_eq!(bmp.get_pixel(4, 4).alpha, 255.0);
+    }
+
+    #[test]
+    fn draw_text_squeeze_blends_each_pixel_once() {
+        let mut bmp = Bitmap::new(6, 20).unwrap();
+        bmp.font.size = 20;
+        bmp.font.outline = false;
+        bmp.font.shadow = false;
+        bmp.font.color = Color::new(255.0, 255.0, 255.0, 128.0);
+        bmp.draw_text(Rect::new(0, 0, 6, 20), "A", 0);
+        assert_eq!(bmp.get_pixel(2, 0).alpha, 128.0);
     }
 }

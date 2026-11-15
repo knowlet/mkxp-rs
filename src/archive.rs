@@ -7,8 +7,11 @@ use crate::error::{Error, Result};
 
 const HEADER: &[u8; 6] = b"RGSSAD";
 const V1_MAGIC: u32 = 0xDEAD_CAFE;
-/// Shared by the reader and the packer. Longer names cannot be opened.
+/// The Rust reader stores the name in a `Vec` and rejects only absurd lengths.
 const MAX_ARCHIVE_NAME_LEN: usize = 1024;
+/// The C++ reader uses `char nameBuf[512]` and writes a NUL at `nameBuf[nameLen]`.
+/// A 512-byte name already steps one past that array, so the packer stops at 511.
+const MAX_PACKED_NAME_LEN: usize = 511;
 
 /// One file stored in an RGSS archive.
 #[derive(Clone, Debug)]
@@ -303,7 +306,7 @@ fn insert_entry(
         .get(&name)
         .is_some_and(|previous| previous.raw_name.as_slice() != raw_name)
     {
-        name = disambiguated_archive_name(raw_name);
+        name = disambiguated_entry_name(&name, raw_name);
     }
     if entries
         .get(&name)
@@ -342,6 +345,16 @@ fn disambiguated_archive_name(bytes: &[u8]) -> String {
         name.push(char::from_digit(u32::from(*byte & 0x0f), 16).unwrap_or('0'));
     }
     name
+}
+
+/// Keep the normalized directory and only replace the leaf, so `list_dir` and
+/// `extract_to` still see the entry under its parent.
+fn disambiguated_entry_name(display: &str, raw: &[u8]) -> String {
+    let leaf = disambiguated_archive_name(raw);
+    match display.rsplit_once('/') {
+        Some((dir, _)) if !dir.is_empty() => format!("{dir}/{leaf}"),
+        _ => leaf,
+    }
 }
 
 fn push_unique(list: &mut Vec<String>, value: String) {
@@ -469,7 +482,7 @@ fn encrypt_body(data: &[u8], magic: u32) -> Vec<u8> {
 
 fn checked_archive_name(name: &str) -> Result<String> {
     let name = normalize_name(name);
-    if name.len() > MAX_ARCHIVE_NAME_LEN {
+    if name.len() > MAX_PACKED_NAME_LEN {
         return Err(Error::new("RGSS archive name is unreasonably long"));
     }
     Ok(name)
@@ -881,8 +894,38 @@ mod tests {
                 "version {version}: {err}"
             );
         }
-        let limit = "a".repeat(MAX_ARCHIVE_NAME_LEN);
+        let limit = "a".repeat(MAX_PACKED_NAME_LEN);
         let packed = Archive::pack(1, &[(&limit, b"ok")]).unwrap();
         assert_eq!(Archive::open(packed).unwrap().read(&limit).unwrap(), b"ok");
+        let too_long_for_cpp = "b".repeat(512);
+        let err = Archive::pack(1, &[(&too_long_for_cpp, b"no")]).unwrap_err();
+        assert!(err.to_string().contains("unreasonably long"));
+    }
+
+    #[test]
+    fn colliding_nested_names_stay_in_their_directory() {
+        let packed = pack_v1_raw(&[
+            (b"Data/\xe9.dat".as_slice(), b"latin"),
+            (b"Data/\xc3\xa9.dat".as_slice(), b"utf8"),
+        ]);
+        let archive = Archive::open(packed).unwrap();
+        let children = archive.list_dir("Data");
+        assert_eq!(children.len(), 2, "{children:?}");
+        assert!(archive.list_dir("").iter().all(|name| name != "\u{FFFE}"));
+        let root = std::env::temp_dir().join(format!("mkxpz-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        archive.extract_to(&root).unwrap();
+        let data = root.join("Data");
+        let files: Vec<_> = std::fs::read_dir(&data)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files.len(), 2, "{files:?}");
+        let root_entries: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(root_entries, vec![data]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

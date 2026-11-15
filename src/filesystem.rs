@@ -217,6 +217,10 @@ fn lookup_archive(
     logical: &str,
     supplement: bool,
 ) -> Result<Option<(String, Vec<u8>)>> {
+    if archive.contains(logical) {
+        let bytes = archive.read(logical)?;
+        return Ok(Some((logical.to_string(), bytes)));
+    }
     let wanted = logical.to_ascii_lowercase();
     let mut exact = None;
     let mut extra = None;
@@ -348,5 +352,15 @@ mod tests {
         let err = fs.read("Data/System.rxdata").unwrap_err();
         assert!(err.to_string().contains("extends past the end of the file"));
         assert!(!err.to_string().contains("old"));
+    }
+
+    #[test]
+    fn archive_lookup_prefers_the_exact_key() {
+        let packed = Archive::pack(1, &[("Foo", b"folded"), ("foo", b"exact")]).unwrap();
+        let mut fs = FileSystem::new(true);
+        fs.mount_archive_bytes(packed).unwrap();
+        assert_eq!(fs.read("foo").unwrap(), b"exact");
+        assert_eq!(fs.read("Foo").unwrap(), b"folded");
+        assert_eq!(fs.read("FOO").unwrap(), b"folded");
     }
 }
