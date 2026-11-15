@@ -32,15 +32,14 @@ impl Default for Channel {
 }
 
 impl Channel {
-    fn play(&mut self, filename: &str, volume: i32, pitch: i32, pos: f64) {
+    /// Returns whether playback started or restarted. The same file and pitch,
+    /// with no fade in progress, only replaces the base volume.
+    fn play(&mut self, filename: &str, volume: i32, pitch: i32, pos: f64) -> bool {
         let volume = volume.clamp(0, 100);
         let pitch = pitch.clamp(50, 150);
-        // Same file and pitch, and no fade in progress: keep the clock and
-        // only replace the base volume. An in-progress fade is finished by
-        // stopping it and starting from the requested position.
         if self.playing && self.fade_left <= 0 && self.filename == filename && self.pitch == pitch {
             self.volume = volume;
-            return;
+            return false;
         }
         self.filename = filename.to_string();
         self.volume = volume;
@@ -50,6 +49,7 @@ impl Channel {
         self.fade_ms = 0;
         self.fade_left = 0;
         self.fade_from = self.volume;
+        self.playing
     }
 
     fn stop(&mut self) {
@@ -225,9 +225,10 @@ impl Audio {
     }
 
     pub fn me_play(&mut self, filename: &str, volume: i32, pitch: i32) {
-        self.me.play(filename, volume, pitch, 0.0);
-        if self.me.playing {
-            // A new ME starts its own duck. Do not inherit a finished timer.
+        let started = self.me.play(filename, volume, pitch, 0.0);
+        if started {
+            // A new or restarted ME starts its own duck. Repeating the same
+            // file only changes volume and must not let BGM advance again.
             self.me_phase = MePhase::Ducking;
             self.me_ms = 200;
         }
@@ -459,6 +460,31 @@ mod tests {
         assert!(
             (again - held - 0.2).abs() < 1e-9,
             "a new ME should duck for another 200ms, got {held} -> {again}"
+        );
+    }
+
+    #[test]
+    fn repeating_the_same_me_does_not_restart_the_duck() {
+        let mut audio = Audio::new(1, 1);
+        audio.bgm_play("bgm", 100, 100, 0.0, 0);
+        audio.me_play("me", 100, 100);
+        audio.update(1000);
+        let held = audio.bgm_pos(0);
+        audio.me_play("me", 40, 100);
+        audio.update(1000);
+        let still = audio.bgm_pos(0);
+        assert!(
+            (still - held).abs() < 1e-9,
+            "the same ME should keep BGM held, got {held} -> {still}"
+        );
+        assert_eq!(audio.bgm_level(0), 0);
+
+        audio.me_play("other", 100, 100);
+        audio.update(1000);
+        let restarted = audio.bgm_pos(0);
+        assert!(
+            (restarted - held - 0.2).abs() < 1e-9,
+            "a different ME should duck for another 200ms, got {held} -> {restarted}"
         );
     }
 
