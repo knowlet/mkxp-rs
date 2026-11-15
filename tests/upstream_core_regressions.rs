@@ -43,8 +43,20 @@ fn oversized_bitmaps_return_errors_without_allocating() {
 #[test]
 fn directory_mounts_see_new_files_without_cache_rebuild() {
     // #315/#319 and mount-order concern #93.
-    let root = std::env::temp_dir().join(format!("mkxp-upstream-cache-{}", std::process::id()));
+    // A leftover `picture.txt` from an interrupted run would make the directory
+    // mount win before the archive is observed, so the directory must be unique
+    // and removed even when an assertion fails.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let root = std::env::temp_dir().join(format!(
+        "mkxp-upstream-cache-{}-{nanos}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
+    let _cleanup = RemoveOnDrop(&root);
     let mut fs = FileSystem::new(false);
     fs.mount_dir(&root).unwrap();
     fs.mount_archive_bytes(Archive::pack(3, &[("picture.txt", b"archive")]).unwrap())
@@ -52,5 +64,12 @@ fn directory_mounts_see_new_files_without_cache_rebuild() {
     assert_eq!(fs.read("PICTURE.TXT").unwrap(), b"archive");
     std::fs::write(root.join("picture.txt"), b"directory").unwrap();
     assert_eq!(fs.read_with_extension("PICTURE").unwrap().1, b"directory");
-    std::fs::remove_dir_all(&root).unwrap();
+}
+
+struct RemoveOnDrop<'a>(&'a std::path::Path);
+
+impl Drop for RemoveOnDrop<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.0);
+    }
 }
